@@ -5,7 +5,8 @@ services:
     name: neon-adda-api
     runtime: node
     plan: free
-    region: singapore
+    # Next to the database (Neon, AWS us-east-2) and Vercel (Washington, D.C.).
+    region: ohio
     branch: main
     buildCommand: >-
       corepack enable &&

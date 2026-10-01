@@ -1,0 +1,57 @@
+{
+  "name": "@neon-adda/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./web/client": {
+      "types": "./dist/web/client.d.ts",
+      "import": "./dist/web/client.js",
+      "require": "./dist/web/client.cjs"
+    },
+    "./web/server": {
+      "types": "./dist/web/server.d.ts",
+      "import": "./dist/web/server.js",
+      "require": "./dist/web/server.cjs"
+    },
+    "./theme.css": "./theme.css"
+  },
+  "files": [
+    "dist",
+    "theme.css"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "firebase": "^12.19.0",
+    "next": "^15.5.26",
+    "react": "^19.3.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "firebase": ">=12",
+    "next": ">=15"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    },
+    "next": {
+      "optional": true
+    }
+  }
+}

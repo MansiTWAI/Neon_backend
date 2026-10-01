@@ -1,0 +1,24 @@
+packages:
+  - shared
+
+onlyBuiltDependencies:
+  - '@nestjs/core'
+  - '@prisma/client'
+  - '@prisma/engines'
+  - '@tailwindcss/oxide'
+  - esbuild
+  - prisma
+  - sharp
+  - unrs-resolver
+
+ignoredBuiltDependencies:
+  - '@embedded-postgres/windows-x64'
+  - '@firebase/util'
+  - protobufjs
+
+# @fastify/cookie augments Fastify's types but does not declare Fastify as a peer,
+# so under pnpm's strict layout the augmentation cannot find the module it extends.
+packageExtensions:
+  '@fastify/cookie':
+    peerDependencies:
+      fastify: '*'

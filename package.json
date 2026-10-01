@@ -1,0 +1,61 @@
+{
+  "name": "@neon-adda/backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "prisma generate",
+    "build": "pnpm -C shared build && prisma generate && nest build",
+    "dev": "pnpm -C shared build && nest start --watch",
+    "start": "node dist/main.js",
+    "test": "vitest run --dir src && pnpm -C shared test",
+    "typecheck": "pnpm -C shared build && tsc --noEmit",
+    "db:local": "node scripts/local-postgres.mjs",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed",
+    "db:studio": "prisma studio",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/multipart": "^9.4.0",
+    "@neon-adda/shared": "workspace:*",
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/config": "^4.0.2",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-fastify": "^11.1.6",
+    "@node-rs/argon2": "^2.2.1",
+    "@prisma/client": "^6.16.0",
+    "fastify": "^5.11.3",
+    "firebase-admin": "^14.5.0",
+    "jose": "^5.10.0",
+    "otpauth": "^9.5.2",
+    "qrcode": "^1.5.4",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@nestjs/cli": "^11.0.10",
+    "@types/node": "^22.18.0",
+    "@types/qrcode": "^1.5.6",
+    "dotenv": "^17.2.2",
+    "embedded-postgres": "17.6.0-beta.15",
+    "eslint": "^9.36.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "prisma": "^6.16.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.44.1",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22"
+  }
+}

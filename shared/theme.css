@@ -1,0 +1,64 @@
+/*
+ * Neon Adda design tokens, shared by every web app.
+ * Import after Tailwind:  @import 'tailwindcss';  @import '@neon-adda/shared/theme.css';
+ */
+
+@theme {
+  --color-night-950: #07070b;
+  --color-night-900: #0b0b12;
+  --color-night-800: #15151f;
+  --color-night-700: #1c1c2a;
+  --color-night-600: #24243a;
+
+  --color-neon-pink: #ff2e88;
+  --color-neon-violet: #7c3aed;
+  --color-neon-cyan: #22d3ee;
+
+  --color-brand: #e11d74;
+  --color-brand-soft: #fdf2f8;
+
+  --color-ink: #f5f5f7;
+  --color-muted: #a1a1b5;
+
+  --font-display: var(--font-sora), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  --shadow-neon: 0 0 12px #ff2e88, 0 0 32px rgb(255 46 136 / 0.45);
+
+  --animate-flicker-on: flicker-on 0.6s ease-out both;
+
+  @keyframes flicker-on {
+    0% {
+      opacity: 0.15;
+    }
+    8% {
+      opacity: 1;
+    }
+    12% {
+      opacity: 0.3;
+    }
+    20% {
+      opacity: 1;
+    }
+    24% {
+      opacity: 0.6;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+}
+
+@utility neon-text {
+  color: #ffe3f1;
+  text-shadow:
+    0 0 6px var(--color-neon-pink),
+    0 0 18px var(--color-neon-pink),
+    0 0 42px var(--color-neon-pink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-flicker-on {
+    animation: none;
+  }
+}

@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: neonadda-postgres
+    environment:
+      POSTGRES_USER: neonadda
+      POSTGRES_PASSWORD: neonadda
+      POSTGRES_DB: neonadda
+    ports:
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U neonadda']
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: neonadda-redis
+    ports:
+      - '6379:6379'
+
+volumes:
+  pgdata:

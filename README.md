@@ -33,13 +33,14 @@ is sent and the code is filled in on the sign-in screen.
 
 ## Deploy on Render (free)
 
-**New > Blueprint**, pick this repository and apply. `render.yaml` creates a free PostgreSQL database
-and the web service, which builds, migrates and seeds on every deploy. Health check:
-`/v1/health`.
+1. Create a free PostgreSQL database at [neon.tech](https://neon.tech) and copy its **direct**
+   (unpooled) connection string.
+2. On Render, **New > Blueprint**, pick this repository and paste the string as `DATABASE_URL`.
+   `render.yaml` creates the web service, which builds, migrates and seeds on every deploy.
+   Health check: `/v1/health`.
 
-Free-tier limits: the service sleeps after 15 minutes idle; the free database expires after 30 days
-(move `DATABASE_URL` to a free [Neon](https://neon.tech) database before then); uploaded files are
-lost on each deploy until object storage is configured.
+Free-tier limits: the service sleeps after 15 minutes idle (the next request takes about a minute);
+uploaded files are lost on each deploy until object storage is configured.
 
 ## `shared/`
 

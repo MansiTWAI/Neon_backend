@@ -163,14 +163,6 @@ export class CheckoutService {
               };
             }),
           },
-          statusHistory: {
-            create: {
-              toStatus: 'PENDING_PAYMENT',
-              actorId: userId,
-              actorType: 'CUSTOMER',
-              note: 'Order placed',
-            },
-          },
         },
       });
 
@@ -185,7 +177,7 @@ export class CheckoutService {
         });
       }
       await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
-        note: 'Cash on delivery',
+        note: 'Order placed, cash on delivery',
         actorType: 'CUSTOMER',
       });
       return orderNo;

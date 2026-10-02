@@ -33,8 +33,11 @@ export const placeOrderSchema = z.object({
   addressId: z.string().uuid(),
   installation: z.boolean().default(false),
   couponCode: couponCode.optional(),
-  /** Cash on delivery only, until online payments are switched on. */
-  paymentMode: z.enum(['COD']).default('COD'),
+  /**
+   * Cash on delivery only, until online payments are switched on. Older storefront builds still
+   * send FULL or ADVANCE; those orders are taken as cash on delivery too rather than refused.
+   */
+  paymentMode: z.literal('COD').catch('COD'),
   /** Partner code from a franchise's standee QR or link, so the order counts as theirs. */
   referralCode: z
     .string()

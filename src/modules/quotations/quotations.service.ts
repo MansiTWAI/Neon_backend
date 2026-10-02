@@ -218,18 +218,10 @@ export class QuotationsService {
               lineTaxablePaise: item.amountPaise,
             })),
           },
-          statusHistory: {
-            create: {
-              toStatus: 'PENDING_PAYMENT',
-              actorId: userId,
-              actorType: 'CUSTOMER',
-              note: `Quotation ${quote.quoteNo} accepted`,
-            },
-          },
         },
       });
       await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
-        note: 'Cash on delivery',
+        note: `Quotation ${quote.quoteNo} accepted, cash on delivery`,
         actorType: 'CUSTOMER',
       });
       return orderNo;

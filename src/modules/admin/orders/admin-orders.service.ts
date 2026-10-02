@@ -317,7 +317,7 @@ export class AdminOrdersService {
         code: 'PROOF_NOT_EXPECTED',
         title:
           order.status === 'PENDING_PAYMENT'
-            ? 'Proofs are sent once the order is paid'
+            ? 'Proofs are sent once the order is confirmed'
             : 'The design for this order is already approved',
       });
     }

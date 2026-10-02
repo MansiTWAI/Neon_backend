@@ -152,21 +152,22 @@ export class CatalogService {
       sizes: this.sizesOf(product),
       backboards: backboards.filter((b) => priced.has(b.code)),
       leadTimeDays: product.leadTimeDays,
+      // The storefront prices sizes itself, so it needs the same rate the API will charge.
+      rateOverridePaise: product.rateOverride ? Math.round(Number(product.rateOverride) * 100) : null,
       related: related.map((p) => this.toCard(p, rules)),
     };
   }
 
   private toCard(product: ProductWithCategory, rules: PricingRules) {
     const design = product.defaultDesign as unknown as DefaultDesign | null;
-    const smallest = this.sizesOf(product)[0];
-    const price =
-      design && smallest
-        ? calculatePrice(
+    const prices = design
+      ? this.sizesOf(product).map((size) =>
+          calculatePrice(
             {
               productType: product.type,
               backboardCode: design.backboardCode,
-              widthIn: smallest.widthIn,
-              heightIn: smallest.heightIn,
+              widthIn: size.widthIn,
+              heightIn: size.heightIn,
               colorCount: new Set(design.lines.map((line) => line.glowHex)).size,
               addonCodes: [],
               qty: 1,
@@ -174,8 +175,14 @@ export class CatalogService {
               rateOverridePaise: product.rateOverride ? Math.round(Number(product.rateOverride) * 100) : null,
             },
             rules,
-          )
-        : null;
+          ),
+        )
+      : [];
+    // "From" is the smallest size a customer can actually order on its own, not one below the minimum.
+    const price =
+      prices.find((p) => p.status === 'OK' && !p.warnings.includes('BELOW_MIN_ORDER_VALUE')) ??
+      prices.find((p) => p.status === 'OK') ??
+      null;
     const images = (product.images ?? []) as string[];
 
     return {

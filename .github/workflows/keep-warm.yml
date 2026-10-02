@@ -1,0 +1,13 @@
+name: Keep the API awake
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: curl --silent --show-error --fail --max-time 120 https://neon-adda-api.onrender.com/v1/health/live

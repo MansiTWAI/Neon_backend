@@ -42,6 +42,31 @@ export class OtpService {
     ip: string | undefined,
     deliver = true,
   ): Promise<OtpDispatch> {
+    // Sending limits protect the WhatsApp bill and stop message floods; with nothing sent they only
+    // get in the way, so they apply once WhatsApp is connected. Wrong-code attempts are always limited.
+    if (!this.whatsapp.inPreview) await this.assertCanSend(phone, audience);
+
+    // Until WhatsApp is connected nothing can be delivered, so every number uses the same known code.
+    const code = this.whatsapp.inPreview ? this.previewCode : numericCode(CODE_LENGTH);
+    await this.prisma.otpChallenge.create({
+      data: {
+        phone,
+        audience: toDbAudience(audience),
+        codeHash: sha256(`${phone}:${code}`),
+        expiresAt: new Date(Date.now() + CODE_TTL_MS),
+        ip,
+      },
+    });
+    if (deliver) await this.whatsapp.sendOtp(phone, code);
+
+    return {
+      expiresInSeconds: CODE_TTL_MS / 1000,
+      resendInSeconds: this.whatsapp.inPreview ? 0 : RESEND_AFTER_MS / 1000,
+      previewCode: deliver && this.whatsapp.inPreview ? code : undefined,
+    };
+  }
+
+  private async assertCanSend(phone: string, audience: Audience) {
     const recent = await this.prisma.otpChallenge.findMany({
       where: {
         phone,
@@ -60,25 +85,6 @@ export class OtpService {
       const oldest = recent[recent.length - 1]!.createdAt.getTime();
       throw this.tooMany('Too many codes requested. Try again later.', oldest + SEND_WINDOW_MS - Date.now());
     }
-
-    // Until WhatsApp is connected nothing can be delivered, so every number uses the same known code.
-    const code = this.whatsapp.inPreview ? this.previewCode : numericCode(CODE_LENGTH);
-    await this.prisma.otpChallenge.create({
-      data: {
-        phone,
-        audience: toDbAudience(audience),
-        codeHash: sha256(`${phone}:${code}`),
-        expiresAt: new Date(Date.now() + CODE_TTL_MS),
-        ip,
-      },
-    });
-    if (deliver) await this.whatsapp.sendOtp(phone, code);
-
-    return {
-      expiresInSeconds: CODE_TTL_MS / 1000,
-      resendInSeconds: RESEND_AFTER_MS / 1000,
-      previewCode: deliver && this.whatsapp.inPreview ? code : undefined,
-    };
   }
 
   /** Consumes the latest outstanding code for the number, or throws. */

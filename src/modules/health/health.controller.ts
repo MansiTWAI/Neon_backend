@@ -13,4 +13,10 @@ export class HealthController {
     );
     return { status: 'ok', database, time: new Date().toISOString() };
   }
+
+  /** Answers without touching the database, for uptime pings that should not keep it awake. */
+  @Get('live')
+  live() {
+    return { status: 'ok' };
+  }
 }

@@ -106,6 +106,14 @@ export function createServerApi({
 
   return {
     request,
+    /**
+     * Whether the browser holds a session, without asking the API. An expired access token with a
+     * live refresh token still counts: the browser client refreshes it on its next request.
+     */
+    async hasSession(): Promise<boolean> {
+      const jar = await cookies();
+      return jar.has(accessCookie(audience)) || jar.has(refreshCookie(audience));
+    },
     /** The signed-in user, or null when there is no valid session. Never redirects. */
     async profile(): Promise<Profile | null> {
       const token = (await cookies()).get(accessCookie(audience))?.value;

@@ -6,6 +6,7 @@ import { validateEnv } from './config/env';
 import { DatabaseModule } from './database/database.module';
 import { AddressesModule } from './modules/addresses/addresses.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { AssistantModule } from './modules/assistant/assistant.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
@@ -42,6 +43,7 @@ import { UploadsModule } from './modules/uploads/uploads.module';
     AdminModule,
     StaffModule,
     PartnerModule,
+    AssistantModule,
     FieldServiceModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: ProblemDetailsFilter }],

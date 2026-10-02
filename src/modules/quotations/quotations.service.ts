@@ -5,6 +5,7 @@ import { PrismaService } from '../../database/prisma.service';
 import { letteringOf } from '../designs/design.dto';
 import { DesignsService } from '../designs/designs.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { OrderWorkflowService } from '../order-workflow/order-workflow.service';
 import { PricingService } from '../pricing/pricing.service';
 import { StorageService } from '../storage/storage.service';
 import { addressSnapshot } from '../orders/address-snapshot';
@@ -42,6 +43,7 @@ export class QuotationsService {
     private readonly pricing: PricingService,
     private readonly storage: StorageService,
     private readonly notifications: NotificationsService,
+    private readonly workflow: OrderWorkflowService,
   ) {}
 
   async request(userId: string, dto: RequestQuoteDto) {
@@ -144,7 +146,7 @@ export class QuotationsService {
     return this.detail(userId, id);
   }
 
-  /** Accepting turns the quotation into an order at the quoted price, awaiting payment. */
+  /** Accepting turns the quotation into a confirmed cash-on-delivery order at the quoted price. */
   async accept(userId: string, id: string, dto: AcceptQuoteDto) {
     const quote = await this.load(userId, id);
     await this.assertOpen(quote);
@@ -173,7 +175,7 @@ export class QuotationsService {
         throw new ConflictException({ code: 'QUOTE_CHANGED', title: 'This quotation was just updated' });
 
       const orderNo = await nextOrderNo(tx);
-      await tx.order.create({
+      const order = await tx.order.create({
         data: {
           orderNo,
           customerId: userId,
@@ -190,7 +192,8 @@ export class QuotationsService {
           roundOffPaise: BigInt(payable - total),
           totalPaise: BigInt(payable),
           amountDuePaise: BigInt(payable),
-          advanceRequiredPaise: BigInt(payable),
+          paymentMode: 'COD',
+          advanceRequiredPaise: 0n,
           shippingAddress: snapshot,
           billingAddress: snapshot,
           placeOfSupplyState: address.stateCode,
@@ -225,6 +228,10 @@ export class QuotationsService {
           },
         },
       });
+      await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
+        note: 'Cash on delivery',
+        actorType: 'CUSTOMER',
+      });
       return orderNo;
     });
 
@@ -233,7 +240,7 @@ export class QuotationsService {
       {
         kind: 'order.placed',
         title: `Order ${orderNo} placed`,
-        body: `${formatINR(payable)} from quotation ${quote.quoteNo}. We'll confirm once payment is received.`,
+        body: `${formatINR(payable)} from quotation ${quote.quoteNo}. Pay in cash when it arrives.`,
         link: `/orders/${orderNo}`,
       },
       ['customer'],

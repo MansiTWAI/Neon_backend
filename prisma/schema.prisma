@@ -113,6 +113,7 @@ enum OrderPaymentStatus {
 enum PaymentMode {
   FULL
   ADVANCE
+  COD
 }
 
 enum PaymentPurpose {
@@ -213,12 +214,14 @@ enum PayoutStatus {
 enum JobStatus {
   UNASSIGNED
   SCHEDULED
+  ACCEPTED
   ON_THE_WAY
   REACHED
   WORK_STARTED
   COMPLETED
   RESCHEDULED
   FAILED
+  CANCELLED
 }
 
 enum JobPhotoStage {
@@ -796,7 +799,7 @@ model Order {
   createdBy            String?            @db.Uuid
   status               OrderStatus        @default(PENDING_PAYMENT)
   paymentStatus        OrderPaymentStatus @default(UNPAID)
-  paymentMode          PaymentMode        @default(FULL)
+  paymentMode          PaymentMode        @default(COD)
   subtotalPaise        BigInt
   discountPaise        BigInt             @default(0)
   installationPaise    BigInt             @default(0)

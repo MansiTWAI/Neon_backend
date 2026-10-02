@@ -1,8 +1,12 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { CUSTOMER_CANCELLABLE, REVIEWABLE } from '@neon-adda/shared';
 import { Prisma } from '@prisma/client';
+import { Env } from '../../config/env';
 import { PrismaService } from '../../database/prisma.service';
 import { letteringOf } from '../designs/design.dto';
+import { completionCode } from '../field-service/completion-code';
+import { OrderWorkflowService } from '../order-workflow/order-workflow.service';
 import { StorageService } from '../storage/storage.service';
 import { CancelOrderDto, ProofDecisionDto, ReviewDto, TicketDto } from './orders.dto';
 
@@ -38,6 +42,8 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly workflow: OrderWorkflowService,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   async list(userId: string) {
@@ -230,6 +236,7 @@ export class OrdersService {
       await tx.orderStatusHistory.create({
         data: { orderId: order.id, fromStatus: order.status, toStatus, actorId, actorType: 'CUSTOMER', note },
       });
+      if (toStatus === 'CANCELLED') await this.workflow.cancelWork(tx, order.id);
     });
   }
 
@@ -245,7 +252,6 @@ export class OrdersService {
       paymentStatus: order.paymentStatus,
       paymentMode: order.paymentMode,
       placedAt: order.createdAt,
-      payBy: order.status === 'PENDING_PAYMENT' ? order.expiresAt : null,
       cancelledAt: order.cancelledAt,
       cancelReason: order.cancelReason,
       installationRequired: order.installationRequired,
@@ -286,7 +292,6 @@ export class OrdersService {
         totalPaise: paise(order.totalPaise),
         paidPaise: paise(order.amountPaidPaise),
         duePaise: paise(order.amountDuePaise),
-        payNowPaise: paise(order.advanceRequiredPaise),
       },
       shippingAddress: order.shippingAddress,
       billingAddress: order.billingAddress,
@@ -302,6 +307,10 @@ export class OrdersService {
             scheduledEnd: job.scheduledEnd,
             technician: job.technician?.name ?? null,
             completedAt: job.completedAt,
+            // Read out to the technician once the sign is up; only shown while the visit is under way.
+            completionCode: ['ON_THE_WAY', 'REACHED', 'WORK_STARTED'].includes(job.status)
+              ? completionCode(job.id, this.config.get('JWT_SECRET', { infer: true }))
+              : null,
           }
         : null,
       invoices: order.invoices.map((invoice) => ({

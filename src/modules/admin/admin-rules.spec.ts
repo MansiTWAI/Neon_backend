@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { temporaryPassword } from '../../common/security/temporary-password';
 import { commissionRuleSchema } from './commission/admin-commission.dto';
 import { statusChangeSchema } from './orders/admin-orders.dto';
-import { financialYearOf } from './orders/order-workflow.service';
+import { financialYearOf } from '../order-workflow/order-workflow.service';
 import { couponSchema, rateEntriesSchema } from './pricing/admin-pricing.dto';
 
 describe('financialYearOf', () => {

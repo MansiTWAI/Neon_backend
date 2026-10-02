@@ -19,6 +19,12 @@ const envSchema = z
     PUBLIC_API_URL: z.string().url().default('http://localhost:4000'),
     /** Where uploaded files are kept when no object store is configured. */
     STORAGE_DIR: z.string().default('storage'),
+    /** S3-compatible object store (Cloudflare R2, AWS S3, Supabase). Set all four to use it. */
+    S3_ENDPOINT: optionalText,
+    S3_BUCKET: optionalText,
+    S3_ACCESS_KEY_ID: optionalText,
+    S3_SECRET_ACCESS_KEY: optionalText,
+    S3_REGION: z.string().default('auto'),
     DATABASE_URL: z.string().url(),
     CORS_ORIGINS: z
       .string()
@@ -44,12 +50,26 @@ const envSchema = z
     META_WA_TEMPLATE_LANGUAGE: z.string().default('en'),
     META_GRAPH_API_VERSION: z.string().default('v21.0'),
 
+    /** Claude, for the design assistant. Without a key the assistant is hidden. */
+    ANTHROPIC_API_KEY: optionalText,
+    ANTHROPIC_MODEL: z.string().default('claude-sonnet-5-5'),
+    /** Design suggestions allowed per day across all visitors, to cap the bill. */
+    ASSISTANT_DAILY_LIMIT: z.coerce.number().int().min(0).default(300),
+
     FIREBASE_PROJECT_ID: optionalText,
     FIREBASE_CLIENT_EMAIL: optionalText,
     // Service-account keys are usually pasted with literal "\n" sequences.
     FIREBASE_PRIVATE_KEY: optionalText.transform((key) => key?.replace(/\\n/g, '\n')),
   })
   .superRefine((env, ctx) => {
+    const s3 = [env.S3_ENDPOINT, env.S3_BUCKET, env.S3_ACCESS_KEY_ID, env.S3_SECRET_ACCESS_KEY];
+    if (s3.some(Boolean) && !s3.every(Boolean)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['S3_BUCKET'],
+        message: 'Set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY together, or none',
+      });
+    }
     if (Boolean(env.META_WA_ACCESS_TOKEN) !== Boolean(env.META_WA_PHONE_NUMBER_ID)) {
       ctx.addIssue({
         code: 'custom',

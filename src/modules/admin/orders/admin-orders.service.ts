@@ -23,13 +23,17 @@ import {
   StatusChangeDto,
   TicketUpdateDto,
 } from './admin-orders.dto';
-import { OrderWorkflowService } from './order-workflow.service';
+import { OrderWorkflowService } from '../../order-workflow/order-workflow.service';
 
 const paise = (value: bigint) => Number(value);
 
 const QUEUE_FILTERS: Record<OrderQueue, Prisma.OrderWhereInput> = {
   all: {},
-  'awaiting-payment': { status: 'PENDING_PAYMENT' },
+  // Cash on delivery still outstanding once the sign has gone out.
+  'cash-to-collect': {
+    amountDuePaise: { gt: 0 },
+    status: { in: ['SHIPPED', 'DELIVERED', 'INSTALLED'] },
+  },
   'needs-proof': {
     OR: [
       { status: 'CONFIRMED' },
@@ -67,7 +71,11 @@ const detailInclude = {
   statusHistory: { orderBy: { createdAt: 'asc' } },
   payments: { orderBy: { createdAt: 'asc' } },
   commissions: { include: { franchise: { select: { name: true } } } },
-  installationJobs: { orderBy: { createdAt: 'desc' }, take: 1, include: { technician: true } },
+  installationJobs: {
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    include: { technician: true, photos: { orderBy: { createdAt: 'asc' } } },
+  },
   invoices: { orderBy: { issuedAt: 'asc' } },
   supportTickets: { orderBy: { createdAt: 'desc' } },
   review: true,
@@ -157,10 +165,17 @@ export class AdminOrdersService {
         title: `An order that is ${label(order.status)} cannot be moved to ${label(dto.to)}`,
       });
     }
-    if (dto.to === 'SHIPPED' && order.amountDuePaise > 0n) {
+    // Cash on delivery is collected at the door, so only prepaid orders must be settled before dispatch.
+    if (dto.to === 'SHIPPED' && order.paymentMode !== 'COD' && order.amountDuePaise > 0n) {
       throw new ConflictException({
         code: 'BALANCE_DUE',
         title: `Collect the balance of ${formatINR(paise(order.amountDuePaise))} before dispatch`,
+      });
+    }
+    if (dto.to === 'COMPLETED' && order.amountDuePaise > 0n) {
+      throw new ConflictException({
+        code: 'BALANCE_DUE',
+        title: `Record the ${formatINR(paise(order.amountDuePaise))} collected before completing the order`,
       });
     }
     if (dto.to === 'CANCELLED' && order.amountPaidPaise > 0n) {
@@ -194,7 +209,7 @@ export class AdminOrdersService {
       await this.workflow.history(tx, order.id, order.status, dto.to, actorId, dto.note);
       if (dto.to === 'SHIPPED') await this.workflow.issueInvoice(tx, order.id);
       if (dto.to === 'COMPLETED') await this.workflow.markCommissionEligible(tx, order.id);
-      if (dto.to === 'CANCELLED' || dto.to === 'EXPIRED') await this.workflow.reverseCommission(tx, order.id);
+      if (dto.to === 'CANCELLED' || dto.to === 'EXPIRED') await this.workflow.cancelWork(tx, order.id);
       if (dto.to === 'INSTALLED') {
         await tx.installationJob.updateMany({
           where: { orderId: order.id, status: { not: 'COMPLETED' } },
@@ -631,6 +646,12 @@ export class AdminOrdersService {
         scheduledEnd: job.scheduledEnd,
         completedAt: job.completedAt,
         notes: job.notes,
+        failReason: job.failReason,
+        photos: job.photos.map((photo) => ({
+          id: photo.id,
+          stage: photo.stage,
+          url: this.storage.url(photo.fileKey),
+        })),
       },
       technicians: technicians.map((t) => ({
         id: t.id,

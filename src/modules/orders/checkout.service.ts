@@ -9,13 +9,11 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { DesignsService, ResolvedDesign } from '../designs/designs.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { OrderWorkflowService } from '../order-workflow/order-workflow.service';
 import { OrderPricing, PricingService } from '../pricing/pricing.service';
 import { addressSnapshot } from './address-snapshot';
 import { nextOrderNo } from './document-numbers';
 import { CheckoutPriceDto, PlaceOrderDto } from './orders.dto';
-
-/** Unpaid orders are held this long before the production slot is released. */
-const PAYMENT_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 const QUOTE_REASONS: Record<string, string> = {
   MAX_WIDTH_EXCEEDED: 'is wider than we make online',
@@ -31,6 +29,7 @@ export class CheckoutService {
     private readonly designs: DesignsService,
     private readonly pricing: PricingService,
     private readonly notifications: NotificationsService,
+    private readonly workflow: OrderWorkflowService,
   ) {}
 
   async price(dto: CheckoutPriceDto) {
@@ -86,11 +85,22 @@ export class CheckoutService {
     const price = this.assertPlaceable(pricing, dto, resolved);
 
     const previewKeys = await Promise.all(dto.lines.map((line) => this.designs.storePreview(line.preview)));
-    const territory = await this.prisma.franchiseTerritory.findUnique({
-      where: { pincode: address.pincode },
-      select: { franchise: { select: { id: true, status: true } } },
-    });
-    const franchiseId = territory?.franchise.status === 'ACTIVE' ? territory.franchise.id : null;
+    // A standee referral earns the franchise its own-sourced rate; otherwise the pincode's franchise handles it.
+    const [referrer, territory] = await Promise.all([
+      dto.referralCode
+        ? this.prisma.franchise.findFirst({
+            where: { code: dto.referralCode, status: 'ACTIVE', deletedAt: null },
+            select: { id: true },
+          })
+        : null,
+      this.prisma.franchiseTerritory.findUnique({
+        where: { pincode: address.pincode },
+        select: { franchise: { select: { id: true, status: true } } },
+      }),
+    ]);
+    const franchiseId =
+      referrer?.id ?? (territory?.franchise.status === 'ACTIVE' ? territory.franchise.id : null);
+    const attributionSource = referrer ? 'SELF_SOURCED' : franchiseId ? 'ASSIGNED' : 'NONE';
 
     const orderNo = await this.prisma.$transaction(async (tx) => {
       const coupon = dto.couponCode ? await this.redeemableCoupon(tx, userId, dto.couponCode) : null;
@@ -107,9 +117,9 @@ export class CheckoutService {
         data: {
           orderNo,
           customerId: userId,
-          channel: 'WEB',
+          channel: referrer ? 'KIOSK' : 'WEB',
           franchiseId,
-          attributionSource: franchiseId ? 'ASSIGNED' : 'NONE',
+          attributionSource,
           paymentMode: dto.paymentMode,
           subtotalPaise: BigInt(price.itemsPaise),
           discountPaise: BigInt(price.discountPaise),
@@ -122,9 +132,7 @@ export class CheckoutService {
           roundOffPaise: BigInt(price.roundOffPaise),
           totalPaise: payable,
           amountDuePaise: payable,
-          advanceRequiredPaise: BigInt(
-            dto.paymentMode === 'ADVANCE' ? price.advance.amountPaise : price.payablePaise,
-          ),
+          advanceRequiredPaise: 0n,
           shippingAddress: snapshot,
           billingAddress: snapshot,
           placeOfSupplyState: address.stateCode,
@@ -132,7 +140,6 @@ export class CheckoutService {
           couponId: coupon?.id,
           pricingSnapshot: price as unknown as Prisma.InputJsonValue,
           installationRequired: price.installationPaise > 0,
-          expiresAt: new Date(Date.now() + PAYMENT_WINDOW_MS),
           items: {
             create: resolved.map((r, i) => {
               const line = price.lines[i]!;
@@ -177,6 +184,10 @@ export class CheckoutService {
           },
         });
       }
+      await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
+        note: 'Cash on delivery',
+        actorType: 'CUSTOMER',
+      });
       return orderNo;
     });
 
@@ -185,7 +196,7 @@ export class CheckoutService {
       {
         kind: 'order.placed',
         title: `Order ${orderNo} placed`,
-        body: `${formatINR(price.payablePaise)} for ${resolved.length === 1 ? 'your sign' : `${resolved.length} signs`}. We'll confirm once payment is received.`,
+        body: `${formatINR(price.payablePaise)} for ${resolved.length === 1 ? 'your sign' : `${resolved.length} signs`}. Pay in cash when it arrives.`,
         link: `/orders/${orderNo}`,
       },
       ['customer'],
@@ -225,12 +236,6 @@ export class CheckoutService {
       throw new UnprocessableEntityException({
         code: 'BELOW_MIN_ORDER_VALUE',
         title: `The minimum order is ${formatINR(pricing.rules.minOrderValuePaise)} before GST`,
-      });
-    }
-    if (dto.paymentMode === 'ADVANCE' && !price.advance.eligible) {
-      throw new UnprocessableEntityException({
-        code: 'ADVANCE_NOT_AVAILABLE',
-        title: 'Part payment is only available on larger orders',
       });
     }
     if (price.payablePaise !== dto.expectedPayablePaise) {

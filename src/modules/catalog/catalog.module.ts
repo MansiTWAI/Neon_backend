@@ -7,5 +7,6 @@ import { CatalogService } from './catalog.service';
   imports: [PricingModule],
   controllers: [CatalogController],
   providers: [CatalogService],
+  exports: [CatalogService],
 })
 export class CatalogModule {}

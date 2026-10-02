@@ -1,7 +1,12 @@
 # Neon Adda API
 
 NestJS 11 API on Fastify with Prisma and PostgreSQL. Serves the storefront
-([Neon_customer](https://github.com/MansiTWAI/Neon_customer)) and the admin panel ([Neon_admin](https://github.com/MansiTWAI/Neon_admin)).
+([Neon_customer](https://github.com/MansiTWAI/Neon_customer)), the admin panel ([Neon_admin](https://github.com/MansiTWAI/Neon_admin)), the
+partner portal ([Neon_franchise](https://github.com/MansiTWAI/Neon_franchise)) and the technician app
+([Neon_technician](https://github.com/MansiTWAI/Neon_technician)).
+
+Orders are cash on delivery: they are confirmed when placed, and the technician or admin records the
+cash or UPI collected. Online payment comes in a later release.
 
 ## Run locally
 
@@ -40,7 +45,13 @@ is sent and the code is filled in on the sign-in screen.
    Health check: `/v1/health`.
 
 Free-tier limits: the service sleeps after 15 minutes idle (the next request takes about a minute);
-uploaded files are lost on each deploy until object storage is configured.
+uploaded files are lost on each deploy until `S3_*` points at a bucket (Cloudflare R2 has a free tier).
+
+## Design assistant
+
+Set `ANTHROPIC_API_KEY` to switch on the studio's "Describe your sign" box. It uses Claude Sonnet 5.5
+(`ANTHROPIC_MODEL`), allows 10 requests per visitor per hour and `ASSISTANT_DAILY_LIMIT` (300) a
+day in total, and never sets prices.
 
 ## `shared/`
 

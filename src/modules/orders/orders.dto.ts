@@ -33,7 +33,16 @@ export const placeOrderSchema = z.object({
   addressId: z.string().uuid(),
   installation: z.boolean().default(false),
   couponCode: couponCode.optional(),
-  paymentMode: z.enum(['FULL', 'ADVANCE']).default('FULL'),
+  /** Cash on delivery only, until online payments are switched on. */
+  paymentMode: z.enum(['COD']).default('COD'),
+  /** Partner code from a franchise's standee QR or link, so the order counts as theirs. */
+  referralCode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z0-9]{3,12}$/)
+    .optional()
+    .catch(undefined),
   /** The total the customer saw. If the server's price differs, the order is not placed. */
   expectedPayablePaise: z.number().int().nonnegative(),
 });

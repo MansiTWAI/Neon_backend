@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -18,17 +19,35 @@ const CONTENT_TYPES: Record<string, ImageType> = { jpg: 'image/jpeg', png: 'imag
 const KEY_PATTERN = /^[a-z]+\/\d{4}-\d{2}\/[0-9a-f-]{36}\.(jpg|png|webp)$/;
 
 /**
- * Stores uploaded files on local disk under STORAGE_DIR. The interface is deliberately the
- * shape of an object store, so moving to S3 means replacing this class and nothing else.
+ * Keeps uploaded files in an S3-compatible bucket when one is configured, otherwise on local disk
+ * under STORAGE_DIR. Files are always served through the API, so the bucket can stay private.
  */
 @Injectable()
 export class StorageService {
+  private readonly logger = new Logger(StorageService.name);
   private readonly root: string;
   private readonly publicUrl: string;
+  private readonly bucket: { client: S3Client; name: string } | null;
 
   constructor(config: ConfigService<Env, true>) {
     this.root = resolve(config.get('STORAGE_DIR', { infer: true }));
     this.publicUrl = config.get('PUBLIC_API_URL', { infer: true });
+
+    const name = config.get('S3_BUCKET', { infer: true });
+    this.bucket = name
+      ? {
+          name,
+          client: new S3Client({
+            endpoint: config.get('S3_ENDPOINT', { infer: true }),
+            region: config.get('S3_REGION', { infer: true }),
+            credentials: {
+              accessKeyId: config.get('S3_ACCESS_KEY_ID', { infer: true })!,
+              secretAccessKey: config.get('S3_SECRET_ACCESS_KEY', { infer: true })!,
+            },
+            forcePathStyle: true,
+          }),
+        }
+      : null;
   }
 
   static isKey(key: string): boolean {
@@ -38,6 +57,12 @@ export class StorageService {
   async put(folder: string, body: Buffer, type: ImageType): Promise<string> {
     const month = new Date().toISOString().slice(0, 7);
     const key = `${folder}/${month}/${crypto.randomUUID()}.${IMAGE_TYPES[type]}`;
+    if (this.bucket) {
+      await this.bucket.client.send(
+        new PutObjectCommand({ Bucket: this.bucket.name, Key: key, Body: body, ContentType: type }),
+      );
+      return key;
+    }
     const path = resolve(this.root, key);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, body);
@@ -46,9 +71,23 @@ export class StorageService {
 
   async get(key: string): Promise<{ body: Buffer; contentType: ImageType } | null> {
     if (!StorageService.isKey(key)) return null;
+    const contentType = CONTENT_TYPES[key.split('.').pop()!]!;
+    if (this.bucket) {
+      try {
+        const object = await this.bucket.client.send(
+          new GetObjectCommand({ Bucket: this.bucket.name, Key: key }),
+        );
+        const bytes = await object.Body?.transformToByteArray();
+        return bytes ? { body: Buffer.from(bytes), contentType } : null;
+      } catch (error) {
+        if (!(error instanceof NoSuchKey))
+          this.logger.warn(`Could not read ${key}: ${(error as Error).name}`);
+        return null;
+      }
+    }
     try {
       const body = await readFile(resolve(this.root, key));
-      return { body, contentType: CONTENT_TYPES[key.split('.').pop()!]! };
+      return { body, contentType };
     } catch {
       return null;
     }

@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { CommissionRule, resolveCommission, roundHalfUp } from '@neon-adda/shared';
 import { OrderStatus, Prisma } from '@prisma/client';
-import { NotificationsService } from '../../notifications/notifications.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type Tx = Prisma.TransactionClient;
+type ActorType = 'STAFF' | 'CUSTOMER';
 
 interface CommissionSettings {
   eligibilityDays: number;
@@ -39,18 +40,35 @@ export class OrderWorkflowService {
     return tx.order.findUniqueOrThrow({ where: { id: orderId }, include: orderForWorkflow });
   }
 
-  /** Payment received: the order is confirmed and work can be scheduled. */
-  async confirm(tx: Tx, order: WorkflowOrder, actorId: string) {
+  /**
+   * The order is confirmed and work can be scheduled: when payment arrives, or straight away for
+   * cash on delivery.
+   */
+  async confirm(
+    tx: Tx,
+    order: WorkflowOrder,
+    actorId: string,
+    { note = 'Payment received', actorType = 'STAFF' }: { note?: string; actorType?: ActorType } = {},
+  ) {
     await tx.order.update({
       where: { id: order.id },
       data: { status: 'CONFIRMED', confirmedAt: new Date() },
     });
-    await this.history(tx, order.id, order.status, 'CONFIRMED', actorId, 'Payment received');
+    await this.history(tx, order.id, order.status, 'CONFIRMED', actorId, note, actorType);
 
     if (order.installationRequired) {
       await tx.installationJob.create({ data: { orderId: order.id, franchiseId: order.franchiseId } });
     }
     await this.accrueCommission(tx, order);
+  }
+
+  /** A cancelled order earns no commission and needs no installation visit. */
+  async cancelWork(tx: Tx, orderId: string) {
+    await this.reverseCommission(tx, orderId);
+    await tx.installationJob.updateMany({
+      where: { orderId, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+      data: { status: 'CANCELLED' },
+    });
   }
 
   async history(
@@ -60,14 +78,15 @@ export class OrderWorkflowService {
     to: OrderStatus,
     actorId: string,
     note?: string,
+    actorType: ActorType = 'STAFF',
   ) {
     await tx.orderStatusHistory.create({
-      data: { orderId, fromStatus: from, toStatus: to, actorId, actorType: 'STAFF', note },
+      data: { orderId, fromStatus: from, toStatus: to, actorId, actorType, note },
     });
   }
 
   /**
-   * Commission is accrued once, when the customer first pays. It stays PENDING until the order is
+   * Commission is accrued once, when the order is confirmed. It stays PENDING until the order is
    * complete and the return window has passed.
    */
   private async accrueCommission(tx: Tx, order: WorkflowOrder) {
@@ -152,7 +171,7 @@ export class OrderWorkflowService {
     });
   }
 
-  async reverseCommission(tx: Tx, orderId: string) {
+  private async reverseCommission(tx: Tx, orderId: string) {
     await tx.commission.updateMany({
       where: { orderId, status: { in: ['PENDING', 'ELIGIBLE', 'ON_HOLD'] } },
       data: { status: 'REVERSED' },

@@ -4,7 +4,7 @@ import { pageSchema, searchSchema } from '../../../common/http/pagination';
 /** The work queues on the orders screen; each is a fixed filter staff use every day. */
 export const ORDER_QUEUES = [
   'all',
-  'awaiting-payment',
+  'cash-to-collect',
   'needs-proof',
   'with-customer',
   'production',

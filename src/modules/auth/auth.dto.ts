@@ -12,7 +12,11 @@ const sixDigitCode = z.string().regex(/^\d{6}$/, 'Enter the 6-digit code');
 export const requestOtpSchema = z.object({ phone: indianMobileSchema });
 export type RequestOtpDto = z.infer<typeof requestOtpSchema>;
 
-export const verifyOtpSchema = z.object({ phone: indianMobileSchema, code: sixDigitCode });
+// Four digits are allowed for the fixed code used while WhatsApp is not connected.
+export const verifyOtpSchema = z.object({
+  phone: indianMobileSchema,
+  code: z.string().regex(/^\d{4,6}$/, 'Enter the code'),
+});
 export type VerifyOtpDto = z.infer<typeof verifyOtpSchema>;
 
 export const passwordLoginSchema = z.object({

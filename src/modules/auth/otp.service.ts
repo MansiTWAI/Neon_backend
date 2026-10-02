@@ -1,4 +1,6 @@
 import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Env } from '../../config/env';
 import { numericCode, safeEqual, sha256 } from '../../common/security/crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { WhatsAppService } from '../whatsapp/whatsapp.service';
@@ -20,10 +22,15 @@ export interface OtpDispatch {
 
 @Injectable()
 export class OtpService {
+  private readonly previewCode: string;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsAppService,
-  ) {}
+    config: ConfigService<Env, true>,
+  ) {
+    this.previewCode = config.get('OTP_PREVIEW_CODE', { infer: true });
+  }
 
   /**
    * @param deliver false when the number cannot sign in to this app. The caller still gets a
@@ -54,7 +61,8 @@ export class OtpService {
       throw this.tooMany('Too many codes requested. Try again later.', oldest + SEND_WINDOW_MS - Date.now());
     }
 
-    const code = numericCode(CODE_LENGTH);
+    // Until WhatsApp is connected nothing can be delivered, so every number uses the same known code.
+    const code = this.whatsapp.inPreview ? this.previewCode : numericCode(CODE_LENGTH);
     await this.prisma.otpChallenge.create({
       data: {
         phone,

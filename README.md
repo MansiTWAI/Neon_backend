@@ -2,8 +2,8 @@
 
 NestJS 11 API on Fastify with Prisma and PostgreSQL. Serves the storefront
 ([Neon_customer](https://github.com/MansiTWAI/Neon_customer)), the admin panel ([Neon_admin](https://github.com/MansiTWAI/Neon_admin)), the
-partner portal ([Neon_franchise](https://github.com/MansiTWAI/Neon_franchise)) and the technician app
-([Neon_technician](https://github.com/MansiTWAI/Neon_technician)).
+partner portal ([Neon_franchise](https://github.com/MansiTWAI/Neon_franchise-)) and the technician app
+([Neon_technician](https://github.com/MansiTWAI/Neon_technician-)).
 
 Orders are cash on delivery: they are confirmed when placed, and the technician or admin records the
 cash or UPI collected. Online payment comes in a later release.
@@ -49,9 +49,14 @@ uploaded files are lost on each deploy until `S3_*` points at a bucket (Cloudfla
 
 ## Design assistant
 
-Set `ANTHROPIC_API_KEY` to switch on the studio's "Describe your sign" box. It uses Claude Sonnet 5.5
-(`ANTHROPIC_MODEL`), allows 10 requests per visitor per hour and `ASSISTANT_DAILY_LIMIT` (300) a
-day in total, and never sets prices.
+Set `GEMINI_API_KEY` to switch on the studio's "Describe your sign" box. It tries the models in
+`GEMINI_MODELS` in order when one is busy; with only `ANTHROPIC_API_KEY` set it uses Claude instead.
+It allows 10 requests per visitor per hour and `ASSISTANT_DAILY_LIMIT` (300) a day in total, and never
+sets prices.
+
+## Sign-in codes
+
+Until WhatsApp is connected, every number signs in with **1234** (`OTP_PREVIEW_CODE`).
 
 ## `shared/`
 

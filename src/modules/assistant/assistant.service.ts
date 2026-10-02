@@ -10,9 +10,9 @@ import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import { Env } from '../../config/env';
 import { CatalogService } from '../catalog/catalog.service';
+import { ClaudeModel, DesignModel, GeminiModel, ModelUnavailable } from './design-models';
 import { SlidingWindow } from './sliding-window';
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const PER_VISITOR_PER_HOUR = 10;
 const IST_OFFSET_MS = 5.5 * 3600_000;
 
@@ -42,14 +42,14 @@ const proposalSchema = z.object({
 
 /**
  * Turns a customer's description ("pink 'Oh Baby' for a baby shower, about 3 feet") into a
- * starting design for the studio. Claude only chooses from the live catalogue and never sees or
- * sets prices: the studio prices the design the normal way once it is loaded.
+ * starting design for the studio. The model (Gemini or Claude, whichever has a key) only chooses
+ * from the live catalogue and never sees or sets prices: the studio prices the design the normal way
+ * once it is loaded.
  */
 @Injectable()
 export class AssistantService {
   private readonly logger = new Logger(AssistantService.name);
-  private readonly apiKey: string | undefined;
-  private readonly model: string;
+  private readonly model: DesignModel | null;
   private readonly dailyLimit: number;
   private readonly perVisitor = new SlidingWindow(PER_VISITOR_PER_HOUR, 3600_000);
   private day = '';
@@ -59,13 +59,18 @@ export class AssistantService {
     config: ConfigService<Env, true>,
     private readonly catalog: CatalogService,
   ) {
-    this.apiKey = config.get('ANTHROPIC_API_KEY', { infer: true });
-    this.model = config.get('ANTHROPIC_MODEL', { infer: true });
+    const gemini = config.get('GEMINI_API_KEY', { infer: true });
+    const claude = config.get('ANTHROPIC_API_KEY', { infer: true });
+    this.model = gemini
+      ? new GeminiModel(gemini, config.get('GEMINI_MODELS', { infer: true }))
+      : claude
+        ? new ClaudeModel(claude, config.get('ANTHROPIC_MODEL', { infer: true }))
+        : null;
     this.dailyLimit = config.get('ASSISTANT_DAILY_LIMIT', { infer: true });
   }
 
   get enabled(): boolean {
-    return Boolean(this.apiKey) && this.dailyLimit > 0;
+    return this.model !== null && this.dailyLimit > 0;
   }
 
   async suggest(prompt: string, visitor: string): Promise<DesignSuggestion> {
@@ -133,66 +138,44 @@ export class AssistantService {
       `Extras: ${assets.addons.map((a) => `${a.code} (${a.name})`).join('; ') || 'none'}`,
     ].join('\n');
 
-    const tool = {
-      name: 'propose_design',
-      description: 'Propose one neon sign design for the studio.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          lines: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 3,
-            items: {
-              type: 'object',
-              properties: {
-                text: { type: 'string', maxLength: 30 },
-                color: { type: 'string', enum: assets.colors.map((c) => c.name) },
-              },
-              required: ['text', 'color'],
+    const schema = {
+      type: 'object',
+      properties: {
+        lines: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', maxLength: 30 },
+              color: { type: 'string', enum: assets.colors.map((c) => c.name) },
             },
+            required: ['text', 'color'],
           },
-          font: { type: 'string', enum: assets.fonts.map((f) => f.family) },
-          widthInches: { type: 'number', minimum: product.minWidthIn, maximum: product.maxWidthIn },
-          backboard: { type: 'string', enum: assets.backboards.map((b) => b.code) },
-          extras: { type: 'array', items: { type: 'string', enum: assets.addons.map((a) => a.code) } },
-          note: { type: 'string', maxLength: 300 },
         },
-        required: ['lines', 'font', 'widthInches', 'backboard', 'note'],
+        font: { type: 'string', enum: assets.fonts.map((f) => f.family) },
+        widthInches: { type: 'number', minimum: product.minWidthIn, maximum: product.maxWidthIn },
+        backboard: { type: 'string', enum: assets.backboards.map((b) => b.code) },
+        // An empty enum is invalid, so extras are only offered when the catalogue has some.
+        ...(assets.addons.length
+          ? { extras: { type: 'array', items: { type: 'string', enum: assets.addons.map((a) => a.code) } } }
+          : {}),
+        note: { type: 'string', maxLength: 300 },
       },
+      required: ['lines', 'font', 'widthInches', 'backboard', 'note'],
     };
 
-    let response: Response;
+    let input: unknown;
     try {
-      response = await fetch(ANTHROPIC_URL, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': this.apiKey!,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: this.model,
-          max_tokens: 600,
-          system,
-          tools: [tool],
-          tool_choice: { type: 'tool', name: tool.name },
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
+      input = await this.model!.propose({ system, prompt, schema });
     } catch (error) {
-      this.logger.warn(`Claude request failed: ${(error as Error).message}`);
-      throw unavailable();
-    }
-    if (!response.ok) {
-      // The body can echo the prompt, so only the status is logged.
-      this.logger.warn(`Claude returned ${response.status}`);
+      if (!(error instanceof ModelUnavailable)) throw error;
+      this.logger.warn(error.message);
       throw unavailable();
     }
 
-    const body = (await response.json()) as { content?: { type: string; input?: unknown }[] };
-    const parsed = proposalSchema.safeParse(body.content?.find((block) => block.type === 'tool_use')?.input);
+    const parsed = proposalSchema.safeParse(input);
     if (!parsed.success) {
       throw new UnprocessableEntityException({
         code: 'ASSISTANT_NO_DESIGN',
@@ -202,7 +185,7 @@ export class AssistantService {
     return parsed.data;
   }
 
-  /** Maps names back to catalogue ids, dropping anything Claude invented. */
+  /** Maps names back to catalogue ids, dropping anything the model invented. */
   private toSuggestion(
     proposal: z.infer<typeof proposalSchema>,
     assets: StudioAssets,

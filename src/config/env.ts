@@ -45,12 +45,30 @@ const envSchema = z
 
     /** WhatsApp Cloud API. Without a token and phone number ID, codes are shown on screen. */
     META_WA_ACCESS_TOKEN: optionalText,
+    /** The sign-in code every number uses while WhatsApp is not connected. Ignored once it is. */
+    OTP_PREVIEW_CODE: z
+      .string()
+      .regex(/^\d{4,6}$/, 'OTP_PREVIEW_CODE must be 4 to 6 digits')
+      .default('1234'),
     META_WA_PHONE_NUMBER_ID: optionalText,
     META_WA_OTP_TEMPLATE: z.string().default('login_code'),
     META_WA_TEMPLATE_LANGUAGE: z.string().default('en'),
     META_GRAPH_API_VERSION: z.string().default('v21.0'),
 
-    /** Claude, for the design assistant. Without a key the assistant is hidden. */
+    /**
+     * The design assistant's model. Gemini is used when its key is set, otherwise Claude; with
+     * neither, the assistant is hidden. GEMINI_MODELS is tried in order when a model is busy.
+     */
+    GEMINI_API_KEY: optionalText,
+    GEMINI_MODELS: z
+      .string()
+      .default('gemini-flash-latest,gemini-3-flash-preview,gemini-3.1-flash-lite')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((model) => model.trim())
+          .filter(Boolean),
+      ),
     ANTHROPIC_API_KEY: optionalText,
     ANTHROPIC_MODEL: z.string().default('claude-sonnet-5-5'),
     /** Design suggestions allowed per day across all visitors, to cap the bill. */

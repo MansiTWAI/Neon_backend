@@ -25,6 +25,10 @@ const envSchema = z
     S3_ACCESS_KEY_ID: optionalText,
     S3_SECRET_ACCESS_KEY: optionalText,
     S3_REGION: z.string().default('auto'),
+    /** Cloudinary keeps uploads and serves them from its CDN. Takes precedence over S3. Set all three. */
+    CLOUDINARY_CLOUD_NAME: optionalText,
+    CLOUDINARY_API_KEY: optionalText,
+    CLOUDINARY_API_SECRET: optionalText,
     DATABASE_URL: z.string().url(),
     CORS_ORIGINS: z
       .string()
@@ -86,6 +90,14 @@ const envSchema = z
         code: 'custom',
         path: ['S3_BUCKET'],
         message: 'Set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY together, or none',
+      });
+    }
+    const cloudinary = [env.CLOUDINARY_CLOUD_NAME, env.CLOUDINARY_API_KEY, env.CLOUDINARY_API_SECRET];
+    if (cloudinary.some(Boolean) && !cloudinary.every(Boolean)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CLOUDINARY_API_SECRET'],
+        message: 'Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET together, or none',
       });
     }
     if (Boolean(env.META_WA_ACCESS_TOKEN) !== Boolean(env.META_WA_PHONE_NUMBER_ID)) {

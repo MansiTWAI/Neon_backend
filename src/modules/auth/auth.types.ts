@@ -6,8 +6,8 @@ export type Audience = (typeof AUDIENCES)[number];
 
 export const audienceSchema = z.enum(AUDIENCES);
 
-/** Audiences that sign in with a mobile number and a one-time code. */
-export const PHONE_AUDIENCES = ['customer', 'technician'] as const satisfies readonly Audience[];
+/** Audiences that sign in with a mobile number and a one-time code (franchise owners can use either). */
+export const PHONE_AUDIENCES = ['customer', 'technician', 'franchise'] as const satisfies readonly Audience[];
 /** Audiences that sign in with an email address and a password. */
 export const PASSWORD_AUDIENCES = ['admin', 'franchise'] as const satisfies readonly Audience[];
 

@@ -32,6 +32,11 @@ export class OtpService {
     this.previewCode = config.get('OTP_PREVIEW_CODE', { infer: true });
   }
 
+  /** True while WhatsApp is not connected and every number signs in with the same known code. */
+  get inPreview(): boolean {
+    return this.whatsapp.inPreview;
+  }
+
   /**
    * @param deliver false when the number cannot sign in to this app. The caller still gets a
    * normal response, so the endpoint does not reveal which numbers are registered.

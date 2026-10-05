@@ -79,14 +79,34 @@ export class AuthService {
   async requestOtp(audience: Audience, phone: string, ip?: string) {
     const canSignIn =
       audience === 'customer' ||
-      (await this.prisma.technician.count({ where: { phone, isActive: true } })) > 0;
+      (audience === 'technician'
+        ? (await this.prisma.technician.count({ where: { phone, isActive: true } })) > 0
+        : (await this.franchiseOwnerFor(phone)) !== null);
+    // Normally an unknown number gets the same answer as a registered one, so the endpoint does not
+    // reveal who is registered. While every number shares the preview code that protects nothing, and
+    // a plain answer saves people from waiting for a code that is never coming.
+    if (!canSignIn && this.otp.inPreview) {
+      throw new UnauthorizedException({
+        code: 'NOT_REGISTERED',
+        title:
+          audience === 'technician'
+            ? 'This number is not registered. Ask your franchise to add you as a technician.'
+            : 'This number is not registered as a franchise phone. Sign in with your email instead.',
+      });
+    }
     return this.otp.send(phone, audience, ip, canSignIn);
   }
 
   async verifyOtp(audience: Audience, { phone, code }: VerifyOtpDto, client: ClientInfo): Promise<SignedIn> {
     await this.otp.verify(phone, audience, code);
     const userId =
-      audience === 'customer' ? await this.customerFor(phone) : await this.technicianUserFor(phone);
+      audience === 'customer'
+        ? await this.customerFor(phone)
+        : audience === 'technician'
+          ? await this.technicianUserFor(phone)
+          : await this.franchiseOwnerFor(phone);
+    if (!userId)
+      throw new UnauthorizedException({ code: 'ACCOUNT_DISABLED', title: 'This number is not registered' });
     return this.signIn(userId, audience, client);
   }
 
@@ -380,6 +400,22 @@ export class AuthService {
       data: { type: 'TECHNICIAN', name: technician.name, technician: { connect: { id: technician.id } } },
     });
     return user.id;
+  }
+
+  /**
+   * The owner of the franchise whose registered phone this is, if their account is active. Owners who
+   * switched on an authenticator app must sign in with their email, so the phone never skips it.
+   */
+  private async franchiseOwnerFor(phone: string): Promise<string | null> {
+    const franchise = await this.prisma.franchise.findFirst({
+      where: {
+        phone,
+        deletedAt: null,
+        owner: { type: 'FRANCHISE', status: 'ACTIVE', deletedAt: null, totpSecret: null },
+      },
+      select: { ownerUserId: true },
+    });
+    return franchise?.ownerUserId ?? null;
   }
 
   private invalidCredentials() {

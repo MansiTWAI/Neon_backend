@@ -251,13 +251,14 @@ export class CloudflareModel implements ImageModel {
     private readonly token: string,
   ) {}
 
-  async generate({ prompt, seed }: ImageRequest): Promise<GeneratedImage> {
+  async generate({ prompt }: ImageRequest): Promise<GeneratedImage> {
     const response = await send(
       `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(this.accountId)}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-        body: JSON.stringify({ prompt: prompt.slice(0, 2048), steps: 6, seed }),
+        // FLUX schnell on Workers AI refuses any field it does not know, including a seed.
+        body: JSON.stringify({ prompt: prompt.slice(0, 2048), steps: 6 }),
       },
     );
     if (!response.ok) {

@@ -133,7 +133,8 @@ describe('CloudflareModel', () => {
       'https://api.cloudflare.com/client/v4/accounts/account-1/ai/run/@cf/black-forest-labs/flux-1-schnell',
     );
     expect(init?.headers).toMatchObject({ authorization: 'Bearer token-1' });
-    expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'red roses', seed: 9 });
+    // Workers AI refuses unknown fields, so only the prompt and steps are sent.
+    expect(JSON.parse(String(init?.body))).toEqual({ prompt: 'red roses', steps: 6 });
   });
 
   it('reports a used-up daily allowance and rests until midnight UTC', async () => {

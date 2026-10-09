@@ -261,12 +261,17 @@ export class ArtworkService {
     const style = plan.style === 'auto' ? 'neon' : plan.style;
     const seed = request.seed ?? randomInt(1, 2_000_000_000);
     const scene = [
+      // Subjects first: image models weigh the start of a prompt most, and a "minimalist" brief
+      // otherwise comes back as an almost empty card.
+      plan.subjects.length
+        ? `Main subjects, large, detailed and filling most of the frame: ${plan.subjects.join('; ')}.`
+        : '',
       plan.scene,
       STYLE_HINTS[style],
       request.colors?.length ? `Colour palette: ${request.colors.join(', ')}.` : '',
-      // The words are drawn on top, so the picture needs a calm area and no lettering of its own.
-      `Leave a clear, uncluttered area in the ${plan.placement} for a title to be added later.`,
-      'Absolutely no text, letters, words, numbers, signatures or watermarks anywhere in the image.',
+      // The words are drawn on top, so the picture needs a calmer patch and no lettering of its own.
+      `Keep the ${plan.placement} of the picture slightly calmer, without hiding the subjects, so a title can be added later.`,
+      'The picture contains no writing of any kind: no letters, words, numbers, digits, logos, signs, captions or watermarks.',
     ]
       .filter(Boolean)
       .join(' ');

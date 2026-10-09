@@ -291,6 +291,7 @@ model User {
   orders          Order[]        @relation("CustomerOrders")
   reviews         Review[]
   uploads         Upload[]
+  artworkUsage    ArtworkUsage[]
   notifications   Notification[]
   auditLogs       AuditLog[]
   pushDevices     PushDevice[]
@@ -539,6 +540,18 @@ model Design {
   @@index([userId])
   @@index([guestToken])
   @@map("designs")
+}
+
+/// AI designer pictures each customer has asked for, per day (India time), to share the free allowance fairly.
+model ArtworkUsage {
+  userId String   @db.Uuid
+  day    DateTime @db.Date
+  count  Int      @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, day])
+  @@map("artwork_usage")
 }
 
 model Upload {

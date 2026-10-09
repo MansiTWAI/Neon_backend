@@ -9,8 +9,9 @@ import {
   Post,
 } from '@nestjs/common';
 import { z } from 'zod';
-import { Meta, type RequestMeta } from '../../common/http/request-meta';
 import { ZodValidationPipe } from '../../common/validation/zod-validation.pipe';
+import { Authenticated, CurrentAuth } from '../auth/auth.decorators';
+import { AccessClaims } from '../auth/auth.types';
 import { ARTWORK_ASPECTS, ARTWORK_STYLES, ArtworkService } from './artwork.service';
 
 export const createSchema = z.object({
@@ -29,34 +30,40 @@ export const createSchema = z.object({
   seed: z.number().int().min(1).max(2_000_000_000).optional(),
 });
 
-/** Public: anyone can turn a description into a personalised design. Rate limited per visitor. */
+/**
+ * Signed-in customers turn a description into a personalised design, a few a day each, so the free
+ * AI allowance is shared fairly. The status is public so the page knows whether to offer it.
+ */
 @Controller('artwork')
 export class ArtworkController {
   constructor(private readonly artwork: ArtworkService) {}
 
   @Get('status')
   status() {
-    return { enabled: this.artwork.enabled };
+    return { enabled: this.artwork.enabled, perCustomerDaily: this.artwork.customerLimit };
   }
 
   /** Starts a picture and answers at once with the job to poll; pictures take 20 to 60 seconds. */
   @Post()
   @HttpCode(202)
+  @Authenticated(['customer'])
   create(
     @Body(new ZodValidationPipe(createSchema)) dto: z.infer<typeof createSchema>,
-    @Meta() meta: RequestMeta,
+    @CurrentAuth() auth: AccessClaims,
   ) {
-    return this.artwork.start(dto, meta.ip);
+    return this.artwork.start(dto, auth.sub);
   }
 
   @Get('jobs/:id')
-  job(@Param('id', ParseUUIDPipe) id: string) {
-    const job = this.artwork.job(id);
-    if (!job)
+  @Authenticated(['customer'])
+  job(@Param('id', ParseUUIDPipe) id: string, @CurrentAuth() auth: AccessClaims) {
+    const job = this.artwork.job(id, auth.sub);
+    if (!job) {
       throw new NotFoundException({
         code: 'ARTWORK_JOB_NOT_FOUND',
         title: 'That design has expired. Create it again.',
       });
+    }
     return job;
   }
 }

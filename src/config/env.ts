@@ -87,7 +87,7 @@ const envSchema = z
      */
     IMAGE_PROVIDERS: z
       .string()
-      .default('gemini,gemini-svg')
+      .default('gemini,cloudflare,gemini-svg')
       .transform((value) =>
         value
           .split(',')
@@ -117,6 +117,8 @@ const envSchema = z
     POLLINATIONS_API_KEY: optionalText,
     /** Pictures the AI designer may make per day across all visitors. 0 switches it off. */
     ARTWORK_DAILY_LIMIT: z.coerce.number().int().min(0).default(150),
+    /** Pictures each signed-in customer may ask for per day. */
+    ARTWORK_PER_CUSTOMER_DAILY: z.coerce.number().int().min(1).default(5),
 
     FIREBASE_PROJECT_ID: optionalText,
     FIREBASE_CLIENT_EMAIL: optionalText,

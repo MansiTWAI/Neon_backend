@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GeminiImageModel, GeminiSvgModel, ImageUnavailable, MIN_SHAPES, retryAfterMs } from './image-models';
+import {
+  CloudflareModel,
+  GeminiImageModel,
+  GeminiSvgModel,
+  ImageUnavailable,
+  MIN_SHAPES,
+  retryAfterMs,
+} from './image-models';
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const drawing = (shapes: number) =>
@@ -109,6 +116,43 @@ describe('GeminiSvgModel', () => {
       .generate({ prompt: 'x', aspect: 'square', seed: 1 })
       .catch((e: unknown) => e);
     expect((error as ImageUnavailable).quota).toBe(true);
+  });
+});
+
+describe('CloudflareModel', () => {
+  it('sends the scene to FLUX and returns the picture', async () => {
+    const fetch = stubFetch(new Response(JSON.stringify({ result: { image: PNG.toString('base64') } })));
+    const image = await new CloudflareModel('account-1', 'token-1').generate({
+      prompt: 'red roses',
+      aspect: 'square',
+      seed: 9,
+    });
+    expect(image.body.equals(PNG)).toBe(true);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/account-1/ai/run/@cf/black-forest-labs/flux-1-schnell',
+    );
+    expect(init?.headers).toMatchObject({ authorization: 'Bearer token-1' });
+    expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'red roses', seed: 9 });
+  });
+
+  it('reports a used-up daily allowance and rests until midnight UTC', async () => {
+    stubFetch(new Response('{}', { status: 429 }));
+    const error = (await new CloudflareModel('a', 't')
+      .generate({ prompt: 'x', aspect: 'square', seed: 1 })
+      .catch((e: unknown) => e)) as ImageUnavailable;
+    expect(error.quota).toBe(true);
+    expect(error.restMs).toBeGreaterThan(0);
+    expect(error.restMs).toBeLessThanOrEqual(24 * 3600_000);
+  });
+
+  it('rests for an hour on a wrong token', async () => {
+    stubFetch(new Response('{}', { status: 401 }));
+    const error = (await new CloudflareModel('a', 't')
+      .generate({ prompt: 'x', aspect: 'square', seed: 1 })
+      .catch((e: unknown) => e)) as ImageUnavailable;
+    expect(error.restMs).toBe(3600_000);
+    expect(error.quota).toBe(false);
   });
 });
 

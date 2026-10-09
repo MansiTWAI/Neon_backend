@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Env } from '../../config/env';
+import { PrismaService } from '../../database/prisma.service';
 import { DesignModel, ModelUnavailable } from './design-models';
 import {
   Aspect,
@@ -15,7 +16,6 @@ import {
   PollinationsModel,
 } from './image-models';
 import { languageModelFrom } from './language-model';
-import { SlidingWindow } from './sliding-window';
 
 export const ARTWORK_STYLES = [
   'auto',
@@ -64,7 +64,6 @@ const STYLE_FONTS: Record<Exclude<ArtworkStyle, 'auto'>, string> = {
 
 const FONTS = NEON_FONT_FAMILIES.map((family) => family.split(':')[0]!);
 const HEX = /^#[0-9a-f]{6}$/i;
-const PER_VISITOR_PER_HOUR = 8;
 const IST_OFFSET_MS = 5.5 * 3600_000;
 
 export interface ArtworkRequest {
@@ -134,12 +133,15 @@ export class ArtworkService {
   private readonly painters: ImageModel[];
   private readonly resting = new Map<string, number>();
   private readonly dailyLimit: number;
-  private readonly perVisitor = new SlidingWindow(PER_VISITOR_PER_HOUR, 3600_000);
+  private readonly perCustomer: number;
   private day = '';
   private usedToday = 0;
-  private readonly jobs = new Map<string, { job: ArtworkJob; expires: number }>();
+  private readonly jobs = new Map<string, { owner: string; job: ArtworkJob; expires: number }>();
 
-  constructor(config: ConfigService<Env, true>) {
+  constructor(
+    config: ConfigService<Env, true>,
+    private readonly prisma: PrismaService,
+  ) {
     // Reading a request is easy work: the light model keeps the free daily allowance of the
     // stronger models for drawing.
     this.planner = languageModelFrom(config, [
@@ -163,6 +165,12 @@ export class ArtworkService {
       .map((name) => available[name]?.() ?? null)
       .filter((model): model is ImageModel => model !== null);
     this.dailyLimit = config.get('ARTWORK_DAILY_LIMIT', { infer: true });
+    this.perCustomer = config.get('ARTWORK_PER_CUSTOMER_DAILY', { infer: true });
+  }
+
+  /** Pictures each signed-in customer may ask for per day. */
+  get customerLimit(): number {
+    return this.perCustomer;
   }
 
   get enabled(): boolean {
@@ -170,23 +178,31 @@ export class ArtworkService {
   }
 
   /**
-   * Checks the limits straight away, then makes the picture in the background. The id is random
-   * and is the only way to collect the result.
+   * Checks the limits straight away, then makes the picture in the background. Only the customer
+   * who asked can collect it. A picture that cannot be made is not counted against them.
    */
-  start(request: ArtworkRequest, visitor: string): { id: string } {
+  async start(request: ArtworkRequest, userId: string): Promise<{ id: string; remaining: number }> {
     if (!this.enabled) {
       throw new ServiceUnavailableException({
         code: 'ARTWORK_UNAVAILABLE',
         title: 'The AI designer is not switched on',
       });
     }
-    this.takeQuota(visitor);
+    const day = this.takeQuota();
+    const used = await this.countCustomer(userId, day).catch((error: unknown) => {
+      this.usedToday -= 1;
+      throw error;
+    });
     this.sweepJobs();
     const id = randomUUID();
-    this.jobs.set(id, { job: { status: 'pending' }, expires: Date.now() + JOB_TTL_MS });
+    const settle = (job: ArtworkJob) =>
+      this.jobs.set(id, { owner: userId, job, expires: Date.now() + JOB_TTL_MS });
+    settle({ status: 'pending' });
     this.create(request).then(
-      (artwork) => this.jobs.set(id, { job: { status: 'done', artwork }, expires: Date.now() + JOB_TTL_MS }),
+      (artwork) => settle({ status: 'done', artwork }),
       (error: unknown) => {
+        this.usedToday -= 1;
+        void this.refundCustomer(userId, day);
         const failure =
           error instanceof HttpException
             ? { status: error.getStatus(), ...(error.getResponse() as { code: string; title: string }) }
@@ -196,14 +212,43 @@ export class ArtworkService {
                 title: 'The AI designer could not paint that just now. Try again in a minute.',
               };
         if (!(error instanceof HttpException)) this.logger.error(error);
-        this.jobs.set(id, { job: { status: 'failed', error: failure }, expires: Date.now() + JOB_TTL_MS });
+        settle({ status: 'failed', error: failure });
       },
     );
-    return { id };
+    return { id, remaining: this.perCustomer - used };
   }
 
-  job(id: string): ArtworkJob | null {
-    return this.jobs.get(id)?.job ?? null;
+  job(id: string, userId: string): ArtworkJob | null {
+    const entry = this.jobs.get(id);
+    return entry && entry.owner === userId ? entry.job : null;
+  }
+
+  /** Counts one more picture for the customer today, or refuses once they reach the limit. */
+  private async countCustomer(userId: string, day: string): Promise<number> {
+    const rows = await this.prisma.$queryRaw<{ count: number }[]>`
+      INSERT INTO artwork_usage ("userId", "day", "count")
+      VALUES (${userId}::uuid, ${day}::date, 1)
+      ON CONFLICT ("userId", "day") DO UPDATE SET "count" = artwork_usage."count" + 1
+      WHERE artwork_usage."count" < ${this.perCustomer}
+      RETURNING "count"`;
+    if (!rows.length) {
+      throw new HttpException(
+        {
+          code: 'ARTWORK_LIMIT',
+          title: `You have made your ${this.perCustomer} AI designs for today. Pick a ready-made background below, or come back tomorrow.`,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    return rows[0]!.count;
+  }
+
+  private async refundCustomer(userId: string, day: string) {
+    await this.prisma.$executeRaw`
+      UPDATE artwork_usage SET "count" = "count" - 1
+      WHERE "userId" = ${userId}::uuid AND "day" = ${day}::date AND "count" > 0`.catch((error: unknown) =>
+      this.logger.warn(`could not return a picture to the allowance: ${(error as Error).message}`),
+    );
   }
 
   private sweepJobs() {
@@ -244,7 +289,8 @@ export class ArtworkService {
     };
   }
 
-  private takeQuota(visitor: string) {
+  /** Takes one picture from the shop-wide daily allowance and returns today's date in India. */
+  private takeQuota(): string {
     const today = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
     if (today !== this.day) {
       this.day = today;
@@ -259,16 +305,8 @@ export class ArtworkService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    if (!this.perVisitor.take(visitor)) {
-      throw new HttpException(
-        {
-          code: 'ARTWORK_LIMIT',
-          title: 'You have made a lot of designs this hour. Try again a little later.',
-        },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
     this.usedToday += 1;
+    return today;
   }
 
   /** Asks the language model to read the request; falls back to simple rules when it cannot. */
@@ -371,7 +409,7 @@ export class ArtworkService {
         {
           code: 'ARTWORK_QUOTA',
           title:
-            "Today's free AI drawing allowance is used up. It resets every day at about 1:30 pm India time.",
+            "Today's free AI allowance is used up. Pick a ready-made background below, or try again tomorrow.",
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );

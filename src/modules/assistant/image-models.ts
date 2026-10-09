@@ -261,9 +261,14 @@ export class CloudflareModel implements ImageModel {
       },
     );
     if (!response.ok) {
-      // 401/403: a wrong token; 429: today's free allowance is used up.
-      const rest = [401, 403].includes(response.status) ? HOUR : response.status === 429 ? HOUR / 2 : 0;
-      throw new ImageUnavailable(`cloudflare returned ${response.status}`, rest);
+      // 401/403: a wrong token. 429: today's free allowance is used up; it renews at midnight UTC.
+      if (response.status === 429) {
+        throw new ImageUnavailable('cloudflare: daily allowance used up', untilUtcMidnight(), true);
+      }
+      throw new ImageUnavailable(
+        `cloudflare returned ${response.status}`,
+        [401, 403].includes(response.status) ? HOUR : 0,
+      );
     }
     const body = (await response.json()) as { result?: { image?: string } };
     if (!body.result?.image) throw new ImageUnavailable('cloudflare returned no image');
@@ -317,4 +322,10 @@ function checked(body: Buffer, source: string): GeneratedImage {
   if (!type || body.length > MAX_BYTES)
     throw new ImageUnavailable(`${source} sent something that is not an image`);
   return { body, type };
+}
+
+function untilUtcMidnight(now = Date.now()): number {
+  const next = new Date(now);
+  next.setUTCHours(24, 0, 0, 0);
+  return next.getTime() - now;
 }

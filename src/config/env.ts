@@ -80,13 +80,14 @@ const envSchema = z
 
     /**
      * The AI designer's painters, tried in order. "gemini" uses GEMINI_API_KEY and needs a billed
-     * Google AI Studio project (free keys have no image quota); "cloudflare" needs
+     * Google AI Studio project (free keys have no image quota); "gemini-svg" has Gemini's text models
+     * draw the artwork as vector art, which works on a free key; "cloudflare" needs
      * CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN (free daily allowance); "pollinations" allows a
      * few images without a key and more with POLLINATIONS_API_KEY.
      */
     IMAGE_PROVIDERS: z
       .string()
-      .default('gemini,cloudflare,pollinations')
+      .default('gemini,gemini-svg')
       .transform((value) =>
         value
           .split(',')
@@ -96,6 +97,15 @@ const envSchema = z
     GEMINI_IMAGE_MODELS: z
       .string()
       .default('gemini-3.1-flash-image,gemini-2.5-flash-image')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((model) => model.trim())
+          .filter(Boolean),
+      ),
+    GEMINI_SVG_MODELS: z
+      .string()
+      .default('gemini-3-flash-preview,gemini-flash-latest,gemini-3.1-flash-lite')
       .transform((value) =>
         value
           .split(',')

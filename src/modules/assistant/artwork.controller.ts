@@ -1,4 +1,13 @@
-import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  NotFoundException,
+  Param,
+  ParseUUIDPipe,
+  Post,
+} from '@nestjs/common';
 import { z } from 'zod';
 import { Meta, type RequestMeta } from '../../common/http/request-meta';
 import { ZodValidationPipe } from '../../common/validation/zod-validation.pipe';
@@ -30,12 +39,24 @@ export class ArtworkController {
     return { enabled: this.artwork.enabled };
   }
 
+  /** Starts a picture and answers at once with the job to poll; pictures take 20 to 60 seconds. */
   @Post()
-  @HttpCode(200)
+  @HttpCode(202)
   create(
     @Body(new ZodValidationPipe(createSchema)) dto: z.infer<typeof createSchema>,
     @Meta() meta: RequestMeta,
   ) {
-    return this.artwork.create(dto, meta.ip);
+    return this.artwork.start(dto, meta.ip);
+  }
+
+  @Get('jobs/:id')
+  job(@Param('id', ParseUUIDPipe) id: string) {
+    const job = this.artwork.job(id);
+    if (!job)
+      throw new NotFoundException({
+        code: 'ARTWORK_JOB_NOT_FOUND',
+        title: 'That design has expired. Create it again.',
+      });
+    return job;
   }
 }

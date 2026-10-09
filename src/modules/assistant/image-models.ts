@@ -16,7 +16,7 @@ export interface ImageRequest {
 
 export interface GeneratedImage {
   body: Buffer;
-  type: ImageType;
+  type: ImageType | 'image/svg+xml';
 }
 
 export interface ImageModel {
@@ -94,6 +94,90 @@ const POLLINATIONS_SIZES: Record<Aspect, [number, number]> = {
   portrait: [864, 1152],
   landscape: [1152, 864],
 };
+
+const VIEWBOXES: Record<Aspect, [number, number]> = {
+  square: [1024, 1024],
+  portrait: [768, 1024],
+  landscape: [1024, 768],
+};
+
+/**
+ * Gemini's text models drawing the artwork as SVG. Works on a free key, where Gemini's image models
+ * have no quota: the result is vector illustration rather than a photograph, which suits neon well.
+ */
+export class GeminiSvgModel implements ImageModel {
+  readonly name = 'gemini-svg';
+
+  constructor(
+    private readonly apiKey: string,
+    private readonly models: string[],
+  ) {}
+
+  async generate({ prompt, aspect }: ImageRequest): Promise<GeneratedImage> {
+    const [width, height] = VIEWBOXES[aspect];
+    const system = [
+      'You are an illustrator who draws in SVG. Reply with ONE complete SVG document and nothing else: no markdown, no explanation.',
+      `Start with <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">.`,
+      'Draw rich, detailed, beautiful artwork that fills the whole canvas: a layered gradient background, many shapes with depth and lighting, radialGradient glows and feGaussianBlur glow filters, about 60 to 200 elements.',
+      'Never use <text>, letters or numbers, <image>, <foreignObject>, scripts, event attributes or links to other files.',
+    ].join('\n');
+
+    let last = new ImageUnavailable('no Gemini model configured');
+    for (const model of this.models) {
+      const response = await send(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: system }] },
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 16000, temperature: 1 },
+          }),
+        },
+      );
+      if (response.ok) {
+        const body = (await response.json()) as {
+          candidates?: { content?: { parts?: { text?: string }[] } }[];
+        };
+        const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
+        const svg = cleanSvg(text, width, height);
+        if (svg) return { body: Buffer.from(svg), type: 'image/svg+xml' };
+        last = new ImageUnavailable(`gemini-svg ${model} returned no drawing`);
+        continue;
+      }
+      last = new ImageUnavailable(`gemini-svg ${model} returned ${response.status}`);
+      if (![404, 429, 500, 503].includes(response.status)) break;
+    }
+    throw last;
+  }
+}
+
+/**
+ * Keeps only the drawing: the outer <svg> element, without scripts, embedded HTML, event handlers
+ * or references to anything outside the file. Returns null when there is no complete drawing.
+ */
+export function cleanSvg(text: string, width: number, height: number): string | null {
+  const start = text.indexOf('<svg');
+  const end = text.lastIndexOf('</svg>');
+  if (start < 0 || end < start) return null;
+  let svg = text.slice(start, end + 6);
+  svg = svg
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject\s*>/gi, '')
+    .replace(/<\/?(script|foreignObject|image|iframe|a)\b[^>]*>/gi, '')
+    .replace(/<text[\s\S]*?<\/text\s*>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s(xlink:)?href\s*=\s*("(?!#)[^"]*"|'(?!#)[^']*')/gi, '')
+    .replace(/url\(\s*['"]?(?!#)[^)]*\)/gi, 'none')
+    .replace(/@import[^;]*;/gi, '');
+  // A fixed size so the browser knows how big to draw it.
+  svg = svg.replace(/^<svg\b[^>]*>/, (tag) => {
+    const rest = tag.replace(/\s(width|height|viewBox|xmlns)\s*=\s*("[^"]*"|'[^']*')/gi, '').slice(4, -1);
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"${rest}>`;
+  });
+  return svg.length > 200 && svg.length < 600_000 ? svg : null;
+}
 
 /**
  * Cloudflare Workers AI running FLUX.1 [schnell]. A free Cloudflare account includes a daily

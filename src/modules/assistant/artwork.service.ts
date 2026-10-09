@@ -1,7 +1,7 @@
 import { NEON_FONT_FAMILIES } from '@neon-adda/shared';
 import { HttpException, HttpStatus, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Env } from '../../config/env';
 import { DesignModel, ModelUnavailable } from './design-models';
@@ -9,6 +9,7 @@ import {
   Aspect,
   CloudflareModel,
   GeminiImageModel,
+  GeminiSvgModel,
   ImageModel,
   ImageUnavailable,
   PollinationsModel,
@@ -93,6 +94,15 @@ export interface Artwork {
   seed: number;
 }
 
+/** A picture being made. Pictures take longer than proxies wait, so the browser polls for them. */
+export type ArtworkJob =
+  | { status: 'pending' }
+  | { status: 'done'; artwork: Artwork }
+  | { status: 'failed'; error: { status: number; code: string; title: string } };
+
+/** Finished jobs are kept this long for the browser to collect. */
+const JOB_TTL_MS = 10 * 60_000;
+
 const planSchema = z.object({
   title: z.string().trim().min(1).max(60),
   style: z.enum(ARTWORK_STYLES).catch('neon'),
@@ -123,6 +133,7 @@ export class ArtworkService {
   private readonly perVisitor = new SlidingWindow(PER_VISITOR_PER_HOUR, 3600_000);
   private day = '';
   private usedToday = 0;
+  private readonly jobs = new Map<string, { job: ArtworkJob; expires: number }>();
 
   constructor(config: ConfigService<Env, true>) {
     this.planner = languageModelFrom(config);
@@ -132,6 +143,8 @@ export class ArtworkService {
     const available: Record<string, () => ImageModel | null> = {
       gemini: () =>
         gemini ? new GeminiImageModel(gemini, config.get('GEMINI_IMAGE_MODELS', { infer: true })) : null,
+      'gemini-svg': () =>
+        gemini ? new GeminiSvgModel(gemini, config.get('GEMINI_SVG_MODELS', { infer: true })) : null,
       cloudflare: () =>
         cloudflareAccount && cloudflareToken ? new CloudflareModel(cloudflareAccount, cloudflareToken) : null,
       pollinations: () => new PollinationsModel(config.get('POLLINATIONS_API_KEY', { infer: true })),
@@ -147,7 +160,11 @@ export class ArtworkService {
     return this.painters.length > 0 && this.dailyLimit > 0;
   }
 
-  async create(request: ArtworkRequest, visitor: string): Promise<Artwork> {
+  /**
+   * Checks the limits straight away, then makes the picture in the background. The id is random
+   * and is the only way to collect the result.
+   */
+  start(request: ArtworkRequest, visitor: string): { id: string } {
     if (!this.enabled) {
       throw new ServiceUnavailableException({
         code: 'ARTWORK_UNAVAILABLE',
@@ -155,7 +172,37 @@ export class ArtworkService {
       });
     }
     this.takeQuota(visitor);
+    this.sweepJobs();
+    const id = randomUUID();
+    this.jobs.set(id, { job: { status: 'pending' }, expires: Date.now() + JOB_TTL_MS });
+    this.create(request).then(
+      (artwork) => this.jobs.set(id, { job: { status: 'done', artwork }, expires: Date.now() + JOB_TTL_MS }),
+      (error: unknown) => {
+        const failure =
+          error instanceof HttpException
+            ? { status: error.getStatus(), ...(error.getResponse() as { code: string; title: string }) }
+            : {
+                status: 500,
+                code: 'ARTWORK_FAILED',
+                title: 'The AI designer could not paint that just now. Try again in a minute.',
+              };
+        if (!(error instanceof HttpException)) this.logger.error(error);
+        this.jobs.set(id, { job: { status: 'failed', error: failure }, expires: Date.now() + JOB_TTL_MS });
+      },
+    );
+    return { id };
+  }
 
+  job(id: string): ArtworkJob | null {
+    return this.jobs.get(id)?.job ?? null;
+  }
+
+  private sweepJobs() {
+    const now = Date.now();
+    for (const [id, entry] of this.jobs) if (entry.expires < now) this.jobs.delete(id);
+  }
+
+  private async create(request: ArtworkRequest): Promise<Artwork> {
     const plan = await this.plan(request);
     const style = plan.style === 'auto' ? 'neon' : plan.style;
     const seed = request.seed ?? randomInt(1, 2_000_000_000);

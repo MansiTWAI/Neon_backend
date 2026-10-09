@@ -13,7 +13,7 @@ import { Meta, type RequestMeta } from '../../common/http/request-meta';
 import { ZodValidationPipe } from '../../common/validation/zod-validation.pipe';
 import { ARTWORK_ASPECTS, ARTWORK_STYLES, ArtworkService } from './artwork.service';
 
-const createSchema = z.object({
+export const createSchema = z.object({
   prompt: z.string().trim().min(3, 'Describe the design you want').max(600),
   style: z.enum(ARTWORK_STYLES).default('auto'),
   aspect: z.enum(ARTWORK_ASPECTS).default('square'),

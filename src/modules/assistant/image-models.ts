@@ -1,4 +1,5 @@
 import { ImageType, sniffImage } from '../storage/storage.service';
+import { balanceTags, isWellFormed } from './svg-markup';
 
 /**
  * The services that paint the artwork behind a design. Each takes a scene description that asks
@@ -12,11 +13,15 @@ export interface ImageRequest {
   prompt: string;
   aspect: Aspect;
   seed: number;
+  /** The things the picture must show, e.g. "red roses with shaded petals". */
+  subjects?: string[];
 }
 
 export interface GeneratedImage {
   body: Buffer;
   type: ImageType | 'image/svg+xml';
+  /** The model that made it, where a service has several. */
+  model?: string;
 }
 
 export interface ImageModel {
@@ -33,6 +38,8 @@ export class ImageUnavailable extends Error {
   constructor(
     message: string,
     readonly restMs = 0,
+    /** True when the account has used up its allowance, rather than a passing failure. */
+    readonly quota = false,
   ) {
     super(message);
   }
@@ -41,6 +48,8 @@ export class ImageUnavailable extends Error {
 const HOUR = 3600_000;
 
 const TIMEOUT_MS = 90_000;
+/** Per model, so that falling back to the next one still fits in a reasonable wait. */
+const SVG_TIMEOUT_MS = 55_000;
 const MAX_BYTES = 8 * 1024 * 1024;
 
 /** Gemini's image models ("Nano Banana"). Needs a key on a billed Google AI Studio project. */
@@ -101,61 +110,110 @@ const VIEWBOXES: Record<Aspect, [number, number]> = {
   landscape: [1024, 768],
 };
 
+/** Fewer shapes than this is a sketch, not artwork: seen when a light model takes over. */
+export const MIN_SHAPES = 35;
+
 /**
  * Gemini's text models drawing the artwork as SVG. Works on a free key, where Gemini's image models
  * have no quota: the result is vector illustration rather than a photograph, which suits neon well.
+ * Free keys allow only about 20 requests a day per model, so a model that runs out is skipped until
+ * its quota resets, and drawings too sparse to match the request are refused rather than shown.
  */
 export class GeminiSvgModel implements ImageModel {
   readonly name = 'gemini-svg';
+  private readonly resting = new Map<string, number>();
 
   constructor(
     private readonly apiKey: string,
     private readonly models: string[],
   ) {}
 
-  async generate({ prompt, aspect }: ImageRequest): Promise<GeneratedImage> {
+  async generate({ prompt, aspect, subjects = [] }: ImageRequest): Promise<GeneratedImage> {
     const [width, height] = VIEWBOXES[aspect];
     const system = [
       'You are an illustrator who draws in SVG. Reply with ONE complete SVG document and nothing else: no markdown, no explanation.',
       `Start with <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">.`,
-      'Draw rich, detailed, beautiful artwork that fills the whole canvas: a layered gradient background, many shapes with depth and lighting, radialGradient glows and feGaussianBlur glow filters, about 60 to 200 elements.',
+      'Draw rich, detailed, beautiful artwork that fills the whole canvas: a layered gradient background, shaded shapes with depth and lighting, radialGradient glows and feGaussianBlur glow filters, about 80 to 250 elements. Follow the requested colours and style closely.',
+      subjects.length
+        ? `You MUST draw every one of these subjects, large and unmistakable, each built from several shaped paths with gradient shading so it is recognisable at a glance:\n${subjects.map((subject) => `- ${subject}`).join('\n')}`
+        : 'Clearly show every subject the brief names.',
+      'The main subjects must together cover at least half of the canvas; never a mostly empty canvas or a blank card.',
       'Never use <text>, letters or numbers, <image>, <foreignObject>, scripts, event attributes or links to other files.',
     ].join('\n');
 
     let last = new ImageUnavailable('no Gemini model configured');
+    let outOfQuota = 0;
     for (const model of this.models) {
-      const response = await send(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { maxOutputTokens: 16000, temperature: 1 },
-          }),
-        },
-      );
+      if ((this.resting.get(model) ?? 0) > Date.now()) {
+        outOfQuota += 1;
+        continue;
+      }
+      let response: Response;
+      try {
+        response = await send(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: system }] },
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig: { maxOutputTokens: 20000, temperature: 1 },
+            }),
+          },
+          SVG_TIMEOUT_MS,
+        );
+      } catch (error) {
+        // A slow model is often just busy: the next one usually answers.
+        last = error as ImageUnavailable;
+        continue;
+      }
       if (response.ok) {
         const body = (await response.json()) as {
           candidates?: { content?: { parts?: { text?: string }[] } }[];
         };
         const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
         const svg = cleanSvg(text, width, height);
-        if (svg) return { body: Buffer.from(svg), type: 'image/svg+xml' };
-        last = new ImageUnavailable(`gemini-svg ${model} returned no drawing`);
+        if (svg && shapeCount(svg) >= MIN_SHAPES) {
+          return { body: Buffer.from(svg), type: 'image/svg+xml', model };
+        }
+        last = new ImageUnavailable(
+          `gemini-svg ${model} returned ${svg ? 'too sparse a drawing' : 'no drawing'}`,
+        );
         continue;
+      }
+      const detail = await response.text().catch(() => '');
+      if (response.status === 429) {
+        outOfQuota += 1;
+        this.resting.set(model, Date.now() + retryAfterMs(detail));
       }
       last = new ImageUnavailable(`gemini-svg ${model} returned ${response.status}`);
       if (![404, 429, 500, 503].includes(response.status)) break;
+    }
+    // Out of quota on some models and refused or failed on the rest: the allowance is the reason.
+    if (outOfQuota) {
+      throw new ImageUnavailable('gemini-svg: every model is out of quota', 0, true);
     }
     throw last;
   }
 }
 
+/** How many drawn shapes an SVG holds. */
+export function shapeCount(svg: string): number {
+  return svg.match(/<(path|circle|ellipse|rect|polygon|polyline|line)\b/g)?.length ?? 0;
+}
+
+/** Reads "Please retry in 14h11m27s" from a quota error; a minute when it says nothing. */
+export function retryAfterMs(detail: string): number {
+  const match = /retry in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i.exec(detail);
+  if (!match || !(match[1] || match[2] || match[3])) return 60_000;
+  return ((Number(match[1] ?? 0) * 60 + Number(match[2] ?? 0)) * 60 + Number(match[3] ?? 0)) * 1000;
+}
+
 /**
  * Keeps only the drawing: the outer <svg> element, without scripts, embedded HTML, event handlers
- * or references to anything outside the file. Returns null when there is no complete drawing.
+ * or references to anything outside the file, with unclosed tags repaired. Returns null when there
+ * is no complete drawing or the markup is still broken, since browsers refuse to draw it.
  */
 export function cleanSvg(text: string, width: number, height: number): string | null {
   const start = text.indexOf('<svg');
@@ -176,7 +234,8 @@ export function cleanSvg(text: string, width: number, height: number): string | 
     const rest = tag.replace(/\s(width|height|viewBox|xmlns)\s*=\s*("[^"]*"|'[^']*')/gi, '').slice(4, -1);
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"${rest}>`;
   });
-  return svg.length > 200 && svg.length < 600_000 ? svg : null;
+  svg = balanceTags(svg);
+  return svg.length > 200 && svg.length < 600_000 && isWellFormed(svg) ? svg : null;
 }
 
 /**
@@ -245,9 +304,9 @@ export class PollinationsModel implements ImageModel {
   }
 }
 
-async function send(url: string, init: RequestInit): Promise<Response> {
+async function send(url: string, init: RequestInit, timeoutMs = TIMEOUT_MS): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     throw new ImageUnavailable(`request failed: ${(error as Error).name}`);
   }

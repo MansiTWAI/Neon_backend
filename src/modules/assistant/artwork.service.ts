@@ -42,7 +42,8 @@ const STYLE_HINTS: Record<Exclude<ArtworkStyle, 'auto'>, string> = {
   '3d': 'polished 3D render, soft studio lighting, glossy materials, octane render look',
   anime: 'anime illustration, vibrant cel shading, clean line art, expressive colours',
   cartoon: 'playful cartoon illustration, bold outlines, flat cheerful colours',
-  minimalist: 'minimalist composition, generous empty space, simple shapes, muted palette',
+  minimalist:
+    'minimalist composition with a bold, clear focal subject, clean simple shapes, a limited palette',
   festive: 'festive celebration, confetti, balloons, sparkling fairy lights, joyful colours',
   luxury: 'luxury aesthetic, gold foil accents, marble and velvet textures, elegant florals',
   watercolor: 'delicate watercolour painting, soft washes, paper texture, hand-painted florals',
@@ -91,6 +92,8 @@ export interface Artwork {
   overlay: ArtworkOverlay;
   style: Exclude<ArtworkStyle, 'auto'>;
   provider: string;
+  /** The model that drew it, when the service has several. */
+  model?: string;
   seed: number;
 }
 
@@ -107,6 +110,7 @@ const planSchema = z.object({
   title: z.string().trim().min(1).max(60),
   style: z.enum(ARTWORK_STYLES).catch('neon'),
   scene: z.string().trim().min(10).max(700),
+  subjects: z.array(z.string().trim().min(2).max(120)).max(5).default([]),
   lines: z
     .array(z.object({ text: z.string().trim().min(1).max(40), size: z.enum(['lg', 'md', 'sm']).catch('md') }))
     .max(4)
@@ -136,7 +140,12 @@ export class ArtworkService {
   private readonly jobs = new Map<string, { job: ArtworkJob; expires: number }>();
 
   constructor(config: ConfigService<Env, true>) {
-    this.planner = languageModelFrom(config);
+    // Reading a request is easy work: the light model keeps the free daily allowance of the
+    // stronger models for drawing.
+    this.planner = languageModelFrom(config, [
+      'gemini-3.1-flash-lite',
+      ...config.get('GEMINI_MODELS', { infer: true }),
+    ]);
     const gemini = config.get('GEMINI_API_KEY', { infer: true });
     const cloudflareAccount = config.get('CLOUDFLARE_ACCOUNT_ID', { infer: true });
     const cloudflareToken = config.get('CLOUDFLARE_AI_TOKEN', { infer: true });
@@ -217,7 +226,7 @@ export class ArtworkService {
       .filter(Boolean)
       .join(' ');
 
-    const image = await this.paint(scene, request.aspect, seed);
+    const image = await this.paint(scene, request.aspect, seed, plan.subjects);
     return {
       image: `data:${image.type};base64,${image.body.toString('base64')}`,
       title: plan.title,
@@ -230,6 +239,7 @@ export class ArtworkService {
       },
       style,
       provider: image.provider,
+      model: image.model,
       seed,
     };
   }
@@ -270,6 +280,7 @@ export class ArtworkService {
       'You are the art director of Neon Adda, an Indian custom neon sign and personalised design studio.',
       'A customer describes a design. Split it into:',
       '1. "scene": a vivid, specific description for an image model of the artwork ONLY: subject, objects, background, lighting, colours, mood, composition. Never put any words, names, letters or numbers in the scene, and never ask for text, typography or a poster title in it.',
+      '   Also list in "subjects" the 1 to 5 things the picture must clearly show, each with its look, e.g. "several large red roses with layered, shaded petals", "glowing red hearts", "a golden 3D birthday cake with candles". Include every object the customer names.',
       '2. "lines": the exact words to write on the design, copied character for character from the customer (names, wishes, dates, emojis). Use "lg" for the main names, "md" for a short phrase, "sm" for a date or detail. Leave it empty if they asked for no words.',
       `3. "font": the typeface that suits the mood, one of: ${FONTS.join(', ')}.`,
       '4. "color" and "glow": hex colours for the lettering and its glow that stand out on the scene and match the requested theme.',
@@ -291,6 +302,7 @@ export class ArtworkService {
         title: { type: 'string', maxLength: 60 },
         style: { type: 'string', enum: ARTWORK_STYLES.filter((s) => s !== 'auto') },
         scene: { type: 'string', maxLength: 700 },
+        subjects: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 120 } },
         lines: {
           type: 'array',
           maxItems: 4,
@@ -308,7 +320,7 @@ export class ArtworkService {
         glow: { type: 'string', description: 'Hex colour such as #ff1f6b' },
         placement: { type: 'string', enum: ['top', 'center', 'bottom'] },
       },
-      required: ['title', 'style', 'scene', 'lines', 'font', 'color', 'glow', 'placement'],
+      required: ['title', 'style', 'scene', 'subjects', 'lines', 'font', 'color', 'glow', 'placement'],
     };
 
     try {
@@ -337,12 +349,15 @@ export class ArtworkService {
     }
   }
 
-  private async paint(scene: string, aspect: Aspect, seed: number) {
+  private async paint(scene: string, aspect: Aspect, seed: number, subjects: string[]) {
     let last: ImageUnavailable | null = null;
     for (const painter of this.painters) {
       if ((this.resting.get(painter.name) ?? 0) > Date.now()) continue;
       try {
-        return { ...(await painter.generate({ prompt: scene, aspect, seed })), provider: painter.name };
+        return {
+          ...(await painter.generate({ prompt: scene, aspect, seed, subjects })),
+          provider: painter.name,
+        };
       } catch (error) {
         if (!(error instanceof ImageUnavailable)) throw error;
         this.logger.warn(error.message);
@@ -351,6 +366,16 @@ export class ArtworkService {
       }
     }
     this.logger.warn(`no image service answered${last ? '' : ' (all resting)'}`);
+    if (last?.quota) {
+      throw new HttpException(
+        {
+          code: 'ARTWORK_QUOTA',
+          title:
+            "Today's free AI drawing allowance is used up. It resets every day at about 1:30 pm India time.",
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     throw new ServiceUnavailableException({
       code: 'ARTWORK_FAILED',
       title: 'The AI designer could not paint that just now. Try again in a minute.',
@@ -419,6 +444,7 @@ export function planByRules(request: ArtworkRequest): Plan {
     title: (words[0] ?? request.prompt).slice(0, 60),
     style,
     scene: `${scene.replace(/["“”]/g, '').replace(/\s+/g, ' ').trim()}`.padEnd(10, '.'),
+    subjects: [],
     lines: words
       .slice(0, 4)
       .map((text, index) => ({ text: text.slice(0, 40), size: index === 0 ? 'lg' : 'md' })),

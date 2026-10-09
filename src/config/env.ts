@@ -105,7 +105,7 @@ const envSchema = z
       ),
     GEMINI_SVG_MODELS: z
       .string()
-      .default('gemini-3-flash-preview,gemini-flash-latest,gemini-3.1-flash-lite')
+      .default('gemini-3-flash-preview,gemini-flash-latest,gemini-3.7-flash,gemini-3.6-flash')
       .transform((value) =>
         value
           .split(',')

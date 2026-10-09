@@ -78,6 +78,36 @@ const envSchema = z
     /** Design suggestions allowed per day across all visitors, to cap the bill. */
     ASSISTANT_DAILY_LIMIT: z.coerce.number().int().min(0).default(300),
 
+    /**
+     * The AI designer's painters, tried in order. "gemini" uses GEMINI_API_KEY and needs a billed
+     * Google AI Studio project (free keys have no image quota); "cloudflare" needs
+     * CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN (free daily allowance); "pollinations" allows a
+     * few images without a key and more with POLLINATIONS_API_KEY.
+     */
+    IMAGE_PROVIDERS: z
+      .string()
+      .default('gemini,cloudflare,pollinations')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((name) => name.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    GEMINI_IMAGE_MODELS: z
+      .string()
+      .default('gemini-3.1-flash-image,gemini-2.5-flash-image')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((model) => model.trim())
+          .filter(Boolean),
+      ),
+    CLOUDFLARE_ACCOUNT_ID: optionalText,
+    CLOUDFLARE_AI_TOKEN: optionalText,
+    POLLINATIONS_API_KEY: optionalText,
+    /** Pictures the AI designer may make per day across all visitors. 0 switches it off. */
+    ARTWORK_DAILY_LIMIT: z.coerce.number().int().min(0).default(150),
+
     FIREBASE_PROJECT_ID: optionalText,
     FIREBASE_CLIENT_EMAIL: optionalText,
     // Service-account keys are usually pasted with literal "\n" sequences.

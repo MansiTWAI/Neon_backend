@@ -29,6 +29,8 @@ interface RequestDetails {
   installation: boolean;
   message: string | null;
   logoKey: string | null;
+  /** A picture sent without a studio design, such as one made in the AI designer. */
+  referenceKey?: string | null;
   /** What the rate card says, as a starting point for the sales team. Never shown as a price. */
   estimatePaise: number | null;
 }
@@ -81,6 +83,7 @@ export class QuotationsService {
       installation: dto.installation,
       message: dto.message || null,
       logoKey,
+      referenceKey: dto.design ? null : previewKey,
       estimatePaise,
     };
 
@@ -293,6 +296,7 @@ export class QuotationsService {
       previewUrl: this.storage.url(quote.design?.previewKey),
       lettering: letteringOf(quote.design?.config),
       logoUrl: this.storage.url(details?.logoKey),
+      referenceUrl: this.storage.url(details?.referenceKey),
       items:
         priced && quote.sentAt
           ? quote.items.map((item) => ({

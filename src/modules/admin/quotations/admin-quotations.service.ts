@@ -73,6 +73,7 @@ interface RequestDetails {
   installation: boolean;
   message: string | null;
   logoKey: string | null;
+  referenceKey?: string | null;
   estimatePaise: number | null;
 }
 
@@ -390,6 +391,7 @@ export class AdminQuotationsService {
       lettering: letteringOf(quote.design?.config),
       previewUrl: this.storage.url(quote.design?.previewKey),
       logoUrl: this.storage.url(details?.logoKey),
+      referenceUrl: this.storage.url(details?.referenceKey),
       items: quote.items.map((item) => ({
         id: item.id,
         description: item.description,

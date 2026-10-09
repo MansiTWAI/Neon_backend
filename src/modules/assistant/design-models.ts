@@ -1,6 +1,7 @@
 /**
- * The two language models the design assistant can use. Each is asked to call one function,
- * `propose_design`, and returns that call's arguments unchecked; the caller validates them.
+ * The two language models the design assistant can use. Each is asked to call one function
+ * (`propose_design` unless the request names another) and returns that call's arguments
+ * unchecked; the caller validates them.
  */
 
 export interface DesignRequest {
@@ -8,6 +9,8 @@ export interface DesignRequest {
   prompt: string;
   /** JSON schema of the function's arguments. */
   schema: Record<string, unknown>;
+  tool?: { name: string; description: string };
+  maxTokens?: number;
 }
 
 export interface DesignModel {
@@ -15,8 +18,7 @@ export interface DesignModel {
   propose(request: DesignRequest): Promise<unknown>;
 }
 
-const TOOL_NAME = 'propose_design';
-const TOOL_DESCRIPTION = 'Propose one neon sign design for the studio.';
+const DEFAULT_TOOL = { name: 'propose_design', description: 'Propose one neon sign design for the studio.' };
 const TIMEOUT_MS = 30_000;
 
 /** The model refused, timed out or is overloaded. The message is safe to log: it never holds the prompt. */
@@ -30,15 +32,21 @@ export class ClaudeModel implements DesignModel {
     private readonly model: string,
   ) {}
 
-  async propose({ system, prompt, schema }: DesignRequest): Promise<unknown> {
+  async propose({
+    system,
+    prompt,
+    schema,
+    tool = DEFAULT_TOOL,
+    maxTokens = 600,
+  }: DesignRequest): Promise<unknown> {
     const response = await post('https://api.anthropic.com/v1/messages', {
       headers: { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
       body: {
         model: this.model,
-        max_tokens: 600,
+        max_tokens: maxTokens,
         system,
-        tools: [{ name: TOOL_NAME, description: TOOL_DESCRIPTION, input_schema: schema }],
-        tool_choice: { type: 'tool', name: TOOL_NAME },
+        tools: [{ name: tool.name, description: tool.description, input_schema: schema }],
+        tool_choice: { type: 'tool', name: tool.name },
         messages: [{ role: 'user', content: prompt }],
       },
     });
@@ -57,7 +65,7 @@ export class GeminiModel implements DesignModel {
     private readonly models: string[],
   ) {}
 
-  async propose({ system, prompt, schema }: DesignRequest): Promise<unknown> {
+  async propose({ system, prompt, schema, tool = DEFAULT_TOOL }: DesignRequest): Promise<unknown> {
     let last = 'no model configured';
     for (const model of this.models) {
       const response = await post(
@@ -70,11 +78,11 @@ export class GeminiModel implements DesignModel {
             tools: [
               {
                 functionDeclarations: [
-                  { name: TOOL_NAME, description: TOOL_DESCRIPTION, parameters: forGemini(schema) },
+                  { name: tool.name, description: tool.description, parameters: forGemini(schema) },
                 ],
               },
             ],
-            toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [TOOL_NAME] } },
+            toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [tool.name] } },
           },
         },
       );
@@ -82,7 +90,7 @@ export class GeminiModel implements DesignModel {
         const body = (await response.json()) as {
           candidates?: { content?: { parts?: { functionCall?: { name: string; args?: unknown } }[] } }[];
         };
-        return body.candidates?.[0]?.content?.parts?.find((part) => part.functionCall?.name === TOOL_NAME)
+        return body.candidates?.[0]?.content?.parts?.find((part) => part.functionCall?.name === tool.name)
           ?.functionCall?.args;
       }
       last = `${model} returned ${response.status}`;

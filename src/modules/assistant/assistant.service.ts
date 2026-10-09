@@ -10,7 +10,8 @@ import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import { Env } from '../../config/env';
 import { CatalogService } from '../catalog/catalog.service';
-import { ClaudeModel, DesignModel, GeminiModel, ModelUnavailable } from './design-models';
+import { DesignModel, ModelUnavailable } from './design-models';
+import { languageModelFrom } from './language-model';
 import { SlidingWindow } from './sliding-window';
 
 const PER_VISITOR_PER_HOUR = 10;
@@ -59,13 +60,7 @@ export class AssistantService {
     config: ConfigService<Env, true>,
     private readonly catalog: CatalogService,
   ) {
-    const gemini = config.get('GEMINI_API_KEY', { infer: true });
-    const claude = config.get('ANTHROPIC_API_KEY', { infer: true });
-    this.model = gemini
-      ? new GeminiModel(gemini, config.get('GEMINI_MODELS', { infer: true }))
-      : claude
-        ? new ClaudeModel(claude, config.get('ANTHROPIC_MODEL', { infer: true }))
-        : null;
+    this.model = languageModelFrom(config);
     this.dailyLimit = config.get('ASSISTANT_DAILY_LIMIT', { infer: true });
   }
 

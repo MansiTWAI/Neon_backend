@@ -15,6 +15,8 @@ export interface ImageRequest {
   seed: number;
   /** The things the picture must show, e.g. "red roses with shaded petals". */
   subjects?: string[];
+  /** How long to wait for one answer; wall backgrounds give up sooner than designs. */
+  timeoutMs?: number;
 }
 
 export interface GeneratedImage {
@@ -61,7 +63,7 @@ export class GeminiImageModel implements ImageModel {
     private readonly models: string[],
   ) {}
 
-  async generate({ prompt, aspect }: ImageRequest): Promise<GeneratedImage> {
+  async generate({ prompt, aspect, timeoutMs }: ImageRequest): Promise<GeneratedImage> {
     let last = new ImageUnavailable('no image model configured');
     for (const model of this.models) {
       const response = await send(
@@ -77,6 +79,7 @@ export class GeminiImageModel implements ImageModel {
             },
           }),
         },
+        timeoutMs,
       );
       if (response.ok) {
         const body = (await response.json()) as {
@@ -251,7 +254,7 @@ export class CloudflareModel implements ImageModel {
     private readonly token: string,
   ) {}
 
-  async generate({ prompt }: ImageRequest): Promise<GeneratedImage> {
+  async generate({ prompt, timeoutMs }: ImageRequest): Promise<GeneratedImage> {
     const response = await send(
       `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(this.accountId)}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
       {
@@ -260,12 +263,17 @@ export class CloudflareModel implements ImageModel {
         // FLUX schnell on Workers AI refuses any field it does not know, including a seed.
         body: JSON.stringify({ prompt: prompt.slice(0, 2048), steps: 6 }),
       },
+      timeoutMs,
     );
     if (!response.ok) {
-      // 401/403: a wrong token. 429: today's free allowance is used up; it renews at midnight UTC.
-      if (response.status === 429) {
+      const detail = await response.text().catch(() => '');
+      // Only error 4006 means today's free neurons are spent (they renew at midnight UTC). A 429
+      // with 3040, "capacity temporarily exceeded", is Cloudflare being busy for a moment: worth
+      // asking again shortly, and never a reason to switch the service off for the day.
+      if (cloudflareQuotaSpent(detail)) {
         throw new ImageUnavailable('cloudflare: daily allowance used up', untilUtcMidnight(), true);
       }
+      if (response.status === 429) throw new ImageUnavailable('cloudflare: busy, try again shortly');
       throw new ImageUnavailable(
         `cloudflare returned ${response.status}`,
         [401, 403].includes(response.status) ? HOUR : 0,
@@ -286,7 +294,7 @@ export class PollinationsModel implements ImageModel {
 
   constructor(private readonly apiKey: string | undefined) {}
 
-  async generate({ prompt, aspect, seed }: ImageRequest): Promise<GeneratedImage> {
+  async generate({ prompt, aspect, seed, timeoutMs }: ImageRequest): Promise<GeneratedImage> {
     const [width, height] = POLLINATIONS_SIZES[aspect];
     const params = new URLSearchParams({
       width: String(width),
@@ -298,10 +306,14 @@ export class PollinationsModel implements ImageModel {
     });
     const path = encodeURIComponent(prompt.slice(0, 900));
     const response = this.apiKey
-      ? await send(`https://gen.pollinations.ai/image/${path}?model=flux&${params}`, {
-          headers: { authorization: `Bearer ${this.apiKey}` },
-        })
-      : await send(`https://image.pollinations.ai/prompt/${path}?${params}`, {});
+      ? await send(
+          `https://gen.pollinations.ai/image/${path}?model=flux&${params}`,
+          {
+            headers: { authorization: `Bearer ${this.apiKey}` },
+          },
+          timeoutMs,
+        )
+      : await send(`https://image.pollinations.ai/prompt/${path}?${params}`, {}, timeoutMs);
     if (!response.ok) {
       const rest = response.status === 401 ? HOUR : [402, 429].includes(response.status) ? HOUR / 6 : 0;
       throw new ImageUnavailable(`pollinations returned ${response.status}`, rest);
@@ -310,9 +322,21 @@ export class PollinationsModel implements ImageModel {
   }
 }
 
-async function send(url: string, init: RequestInit, timeoutMs = TIMEOUT_MS): Promise<Response> {
+/** True when Workers AI says the account's free daily neurons are used up (error 4006). */
+export function cloudflareQuotaSpent(detail: string): boolean {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const body = JSON.parse(detail) as { errors?: { code?: number; message?: string }[] };
+    return (body.errors ?? []).some(
+      (error) => error.code === 4006 || /daily free allocation|neurons/i.test(error.message ?? ''),
+    );
+  } catch {
+    return /daily free allocation|neurons/i.test(detail);
+  }
+}
+
+async function send(url: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs ?? TIMEOUT_MS) });
   } catch (error) {
     throw new ImageUnavailable(`request failed: ${(error as Error).name}`);
   }

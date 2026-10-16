@@ -138,13 +138,35 @@ describe('CloudflareModel', () => {
   });
 
   it('reports a used-up daily allowance and rests until midnight UTC', async () => {
-    stubFetch(new Response('{}', { status: 429 }));
+    stubFetch(
+      new Response(
+        JSON.stringify({
+          errors: [{ code: 4006, message: 'you have used up your daily free allocation of 10,000 neurons' }],
+        }),
+        { status: 429 },
+      ),
+    );
     const error = (await new CloudflareModel('a', 't')
       .generate({ prompt: 'x', aspect: 'square', seed: 1 })
       .catch((e: unknown) => e)) as ImageUnavailable;
     expect(error.quota).toBe(true);
     expect(error.restMs).toBeGreaterThan(0);
     expect(error.restMs).toBeLessThanOrEqual(24 * 3600_000);
+  });
+
+  it('treats "capacity temporarily exceeded" as a passing failure, not a used-up allowance', async () => {
+    stubFetch(
+      new Response(
+        JSON.stringify({ errors: [{ code: 3040, message: 'AiError: Capacity temporarily exceeded' }] }),
+        { status: 429 },
+      ),
+    );
+    const error = (await new CloudflareModel('a', 't')
+      .generate({ prompt: 'x', aspect: 'square', seed: 1 })
+      .catch((e: unknown) => e)) as ImageUnavailable;
+    expect(error).toBeInstanceOf(ImageUnavailable);
+    expect(error.quota).toBe(false);
+    expect(error.restMs).toBe(0);
   });
 
   it('rests for an hour on a wrong token', async () => {

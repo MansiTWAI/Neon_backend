@@ -87,7 +87,7 @@ const envSchema = z
      */
     IMAGE_PROVIDERS: z
       .string()
-      .default('gemini,cloudflare,gemini-svg')
+      .default('cloudflare,gemini,gemini-svg')
       .transform((value) =>
         value
           .split(',')

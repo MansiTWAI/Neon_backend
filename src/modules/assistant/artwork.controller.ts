@@ -30,6 +30,11 @@ export const createSchema = z.object({
   seed: z.number().int().min(1).max(2_000_000_000).optional(),
 });
 
+export const backdropSchema = z.object({
+  prompt: z.string().trim().min(3, 'Describe the room or wall').max(300, 'Keep it under 300 characters'),
+  aspect: z.enum(ARTWORK_ASPECTS).default('landscape'),
+});
+
 /**
  * Signed-in customers turn a description into a personalised design, a few a day each, so the free
  * AI allowance is shared fairly. The status is public so the page knows whether to offer it.
@@ -52,6 +57,20 @@ export class ArtworkController {
     @CurrentAuth() auth: AccessClaims,
   ) {
     return this.artwork.start(dto, auth.sub);
+  }
+
+  /**
+   * Starts an AI wall to preview the customer's sign on. The sign is drawn in their browser; this
+   * only paints the room, so it is quicker than a design, and a wall made before comes back free.
+   */
+  @Post('backdrops')
+  @HttpCode(202)
+  @Authenticated(['customer'])
+  createBackdrop(
+    @Body(new ZodValidationPipe(backdropSchema)) dto: z.infer<typeof backdropSchema>,
+    @CurrentAuth() auth: AccessClaims,
+  ) {
+    return this.artwork.startBackdrop(dto, auth.sub);
   }
 
   @Get('jobs/:id')

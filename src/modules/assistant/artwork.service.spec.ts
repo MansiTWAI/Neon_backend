@@ -3,8 +3,8 @@ import type { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../config/env';
 import type { PrismaService } from '../../database/prisma.service';
-import { createSchema } from './artwork.controller';
-import { ArtworkService } from './artwork.service';
+import { backdropSchema, createSchema } from './artwork.controller';
+import { ArtworkService, backdropScene } from './artwork.service';
 import { ImageModel, ImageUnavailable } from './image-models';
 
 const settings: Partial<Env> = {
@@ -74,7 +74,7 @@ describe('ArtworkService', () => {
 
     const job = await settle(service, id, PRIYA);
     expect(job.status).toBe('done');
-    if (job.status !== 'done') return;
+    if (job.status !== 'done' || !('artwork' in job)) return;
     expect(job.artwork.image).toBe(`data:image/svg+xml;base64,${Buffer.from('<svg/>').toString('base64')}`);
     expect(job.artwork.overlay.lines[0]?.text).toBe('Rahul ❤️ Priya');
     expect(job.artwork.model).toBe('gemini-3-flash-preview');
@@ -139,6 +139,81 @@ describe('ArtworkService', () => {
 
   it('knows nothing of a job it never started', () => {
     expect(serviceWith({ name: 'x', generate: vi.fn() }).service.job('unknown', PRIYA)).toBeNull();
+  });
+});
+
+describe('AI walls', () => {
+  const wall = { prompt: 'A cosy cafe with exposed brick', aspect: 'landscape' } as const;
+  const photo = () => Promise.resolve({ body: Buffer.from('jpeg'), type: 'image/jpeg' as const });
+
+  it('paints only the room, with no sign and no writing in it', async () => {
+    const generate = vi.fn(photo);
+    const { service } = serviceWith({ name: 'cloudflare', generate });
+    const { id, remaining } = await service.startBackdrop(wall, PRIYA);
+    expect(remaining).toBe(1);
+    const job = await settle(service, id, PRIYA);
+    expect(job).toMatchObject({ status: 'done', backdrop: { provider: 'cloudflare', cached: false } });
+    const [painted] = generate.mock.calls[0] as unknown as [{ prompt: string; timeoutMs: number }];
+    expect(painted.prompt).toContain('cosy cafe with exposed brick');
+    expect(painted.prompt).toMatch(/no writing of any kind/);
+    expect(painted.timeoutMs).toBeLessThanOrEqual(30_000);
+  });
+
+  it('hands back a wall made before at once, without using the allowance', async () => {
+    const generate = vi.fn(photo);
+    const { service, database } = serviceWith({ name: 'cloudflare', generate });
+    await settle(service, (await service.startBackdrop(wall, PRIYA)).id, PRIYA);
+    const again = await service.startBackdrop(
+      { ...wall, prompt: '  a cosy CAFE with exposed   brick ' },
+      RAHUL,
+    );
+    expect(again.remaining).toBeNull();
+    expect(service.job(again.id, RAHUL)).toMatchObject({ status: 'done', backdrop: { cached: true } });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(database.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the same job when the customer asks twice while it is being made', async () => {
+    const { service, database } = serviceWith({ name: 'slow', generate: () => new Promise(() => undefined) });
+    const first = await service.startBackdrop(wall, PRIYA);
+    const second = await service.startBackdrop(wall, PRIYA);
+    expect(second.id).toBe(first.id);
+    expect(database.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('tries a service once more after a passing failure, but not after a used-up allowance', async () => {
+    const flaky = vi.fn().mockRejectedValueOnce(new ImageUnavailable('timeout')).mockImplementation(photo);
+    const { service } = serviceWith({ name: 'cloudflare', generate: flaky });
+    const job = await settle(service, (await service.startBackdrop(wall, PRIYA)).id, PRIYA);
+    expect(job.status).toBe('done');
+    expect(flaky).toHaveBeenCalledTimes(2);
+
+    const spent = vi.fn(() => Promise.reject(new ImageUnavailable('out', 1000, true)));
+    const other = serviceWith({ name: 'cloudflare', generate: spent }).service;
+    const failed = await settle(other, (await other.startBackdrop(wall, PRIYA)).id, PRIYA);
+    expect(failed).toMatchObject({ status: 'failed', error: { code: 'ARTWORK_QUOTA' } });
+    expect(spent).toHaveBeenCalledTimes(1);
+  });
+
+  it('never uses the vector drawing service for a wall', async () => {
+    const { service } = serviceWith({ name: 'gemini-svg', generate: vi.fn(photo) });
+    const job = await settle(service, (await service.startBackdrop(wall, PRIYA)).id, PRIYA);
+    expect(job).toMatchObject({ status: 'failed', error: { code: 'ARTWORK_FAILED' } });
+  });
+
+  it('asks for clear space for the sign', () => {
+    expect(backdropScene('a bedroom with fairy lights.')).toMatch(
+      /^Interior photograph of a bedroom with fairy lights\. .*clear, uncluttered space/,
+    );
+  });
+
+  it('validates the request', () => {
+    expect(backdropSchema.parse({ prompt: ' Gaming room ' })).toEqual({
+      prompt: 'Gaming room',
+      aspect: 'landscape',
+    });
+    expect(backdropSchema.safeParse({ prompt: 'x'.repeat(301) }).success).toBe(false);
+    expect(backdropSchema.safeParse({ prompt: 'ok' }).success).toBe(false);
   });
 });
 

@@ -96,14 +96,42 @@ export interface Artwork {
   seed: number;
 }
 
+export interface BackdropRequest {
+  /** The room or wall the customer wants to see their sign on, e.g. "a cosy cafe with exposed brick". */
+  prompt: string;
+  aspect: Aspect;
+}
+
+/** A photo-like wall to preview a neon sign on. It never contains the sign or any lettering. */
+export interface Backdrop {
+  image: string;
+  provider: string;
+  model?: string;
+  /** True when the same wall was made earlier and handed back without asking the AI again. */
+  cached: boolean;
+}
+
 /** A picture being made. Pictures take longer than proxies wait, so the browser polls for them. */
 export type ArtworkJob =
   | { status: 'pending' }
   | { status: 'done'; artwork: Artwork }
+  | { status: 'done'; backdrop: Backdrop }
   | { status: 'failed'; error: { status: number; code: string; title: string } };
 
 /** Finished jobs are kept this long for the browser to collect. */
 const JOB_TTL_MS = 10 * 60_000;
+/** Walls are kept for a day, so asking again, or another customer asking the same, is instant and free. */
+const BACKDROP_TTL_MS = 24 * 3600_000;
+/** Each wall is a few hundred kilobytes; this keeps the cache well inside a small server's memory. */
+const BACKDROP_CACHE_SIZE = 40;
+/** A wall photo takes a few seconds; past this the next service is tried instead. */
+const BACKDROP_TIMEOUT_MS = 30_000;
+/** Vector drawings make poor wall photos, so walls use the photo services only. */
+const BACKDROP_SKIP = new Set(['gemini-svg']);
+/** How long to wait before asking a busy service again; doubled for the second try. */
+const RETRY_PAUSE_MS = 1500;
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const planSchema = z.object({
   title: z.string().trim().min(1).max(60),
@@ -136,7 +164,11 @@ export class ArtworkService {
   private readonly perCustomer: number;
   private day = '';
   private usedToday = 0;
-  private readonly jobs = new Map<string, { owner: string; job: ArtworkJob; expires: number }>();
+  private readonly jobs = new Map<
+    string,
+    { owner: string; job: ArtworkJob; expires: number; key?: string }
+  >();
+  private readonly backdrops = new Map<string, { backdrop: Omit<Backdrop, 'cached'>; expires: number }>();
 
   constructor(
     config: ConfigService<Env, true>,
@@ -188,18 +220,84 @@ export class ArtworkService {
         title: 'The AI designer is not switched on',
       });
     }
+    this.sweepJobs();
+    return this.launch(userId, undefined, async () => ({
+      status: 'done',
+      artwork: await this.create(request),
+    }));
+  }
+
+  /**
+   * Makes a wall to preview the sign on. The sign itself is drawn in the browser, so this only ever
+   * paints the room: it skips the planner and goes straight to the photo services. A wall made
+   * before is handed back at once and costs nothing, and asking again while one is being made
+   * returns the same job.
+   */
+  async startBackdrop(
+    request: BackdropRequest,
+    userId: string,
+  ): Promise<{ id: string; remaining: number | null }> {
+    if (!this.enabled) {
+      throw new ServiceUnavailableException({
+        code: 'ARTWORK_UNAVAILABLE',
+        title: 'AI walls are not switched on',
+      });
+    }
+    this.sweepJobs();
+    const key = backdropKey(request);
+    const cached = this.backdrops.get(key);
+    if (cached) {
+      const id = randomUUID();
+      this.jobs.set(id, {
+        owner: userId,
+        job: { status: 'done', backdrop: { ...cached.backdrop, cached: true } },
+        expires: Date.now() + JOB_TTL_MS,
+      });
+      return { id, remaining: null };
+    }
+    for (const [id, entry] of this.jobs) {
+      if (entry.owner === userId && entry.key === key && entry.job.status === 'pending') {
+        return { id, remaining: null };
+      }
+    }
+    return this.launch(userId, key, async () => {
+      const image = await this.paint(
+        backdropScene(request.prompt),
+        request.aspect,
+        randomInt(1, 2_000_000_000),
+        [],
+        { skip: BACKDROP_SKIP, timeoutMs: BACKDROP_TIMEOUT_MS, retries: 2 },
+      );
+      const backdrop = {
+        image: `data:${image.type};base64,${image.body.toString('base64')}`,
+        provider: image.provider,
+        model: image.model,
+      };
+      this.remember(key, backdrop);
+      return { status: 'done', backdrop: { ...backdrop, cached: false } };
+    });
+  }
+
+  /**
+   * Checks the limits straight away, then does the work in the background. Only the customer who
+   * asked can collect it, and work that fails is not counted against them.
+   */
+  private async launch(
+    userId: string,
+    key: string | undefined,
+    work: () => Promise<Extract<ArtworkJob, { status: 'done' }>>,
+  ): Promise<{ id: string; remaining: number }> {
     const day = this.takeQuota();
     const used = await this.countCustomer(userId, day).catch((error: unknown) => {
       this.usedToday -= 1;
       throw error;
     });
-    this.sweepJobs();
     const id = randomUUID();
     const settle = (job: ArtworkJob) =>
-      this.jobs.set(id, { owner: userId, job, expires: Date.now() + JOB_TTL_MS });
+      this.jobs.set(id, { owner: userId, job, expires: Date.now() + JOB_TTL_MS, key });
     settle({ status: 'pending' });
-    this.create(request).then(
-      (artwork) => settle({ status: 'done', artwork }),
+    work().then(
+      (done) => settle(done),
       (error: unknown) => {
         this.usedToday -= 1;
         void this.refundCustomer(userId, day);
@@ -254,6 +352,17 @@ export class ArtworkService {
   private sweepJobs() {
     const now = Date.now();
     for (const [id, entry] of this.jobs) if (entry.expires < now) this.jobs.delete(id);
+    for (const [key, entry] of this.backdrops) if (entry.expires < now) this.backdrops.delete(key);
+  }
+
+  private remember(key: string, backdrop: Omit<Backdrop, 'cached'>) {
+    this.backdrops.delete(key);
+    this.backdrops.set(key, { backdrop, expires: Date.now() + BACKDROP_TTL_MS });
+    // A Map keeps insertion order, so the first key is the oldest wall.
+    for (const oldest of this.backdrops.keys()) {
+      if (this.backdrops.size <= BACKDROP_CACHE_SIZE) break;
+      this.backdrops.delete(oldest);
+    }
   }
 
   private async create(request: ArtworkRequest): Promise<Artwork> {
@@ -392,20 +501,30 @@ export class ArtworkService {
     }
   }
 
-  private async paint(scene: string, aspect: Aspect, seed: number, subjects: string[]) {
+  private async paint(
+    scene: string,
+    aspect: Aspect,
+    seed: number,
+    subjects: string[],
+    options: { skip?: Set<string>; timeoutMs?: number; retries?: number } = {},
+  ) {
     let last: ImageUnavailable | null = null;
     for (const painter of this.painters) {
-      if ((this.resting.get(painter.name) ?? 0) > Date.now()) continue;
-      try {
-        return {
-          ...(await painter.generate({ prompt: scene, aspect, seed, subjects })),
-          provider: painter.name,
-        };
-      } catch (error) {
-        if (!(error instanceof ImageUnavailable)) throw error;
-        this.logger.warn(error.message);
-        if (error.restMs) this.resting.set(painter.name, Date.now() + error.restMs);
-        last = error;
+      if (options.skip?.has(painter.name)) continue;
+      for (let attempt = 0; attempt <= (options.retries ?? 0); attempt++) {
+        if ((this.resting.get(painter.name) ?? 0) > Date.now()) break;
+        try {
+          const request = { prompt: scene, aspect, seed, subjects, timeoutMs: options.timeoutMs };
+          return { ...(await painter.generate(request)), provider: painter.name };
+        } catch (error) {
+          if (!(error instanceof ImageUnavailable)) throw error;
+          this.logger.warn(error.message);
+          if (error.restMs) this.resting.set(painter.name, Date.now() + error.restMs);
+          last = error;
+          // Only a passing hiccup is worth asking the same service again, after a short pause.
+          if (error.restMs || error.quota) break;
+          if (attempt < (options.retries ?? 0)) await pause(RETRY_PAUSE_MS * (attempt + 1));
+        }
       }
     }
     this.logger.warn(`no image service answered${last ? '' : ' (all resting)'}`);
@@ -424,6 +543,24 @@ export class ArtworkService {
       title: 'The AI designer could not paint that just now. Try again in a minute.',
     });
   }
+}
+
+/** The same wall asked for twice, give or take spacing and capitals, is the same wall. */
+export function backdropKey(request: BackdropRequest): string {
+  return `${request.aspect}|${request.prompt.toLowerCase().replace(/\s+/g, ' ').trim()}`;
+}
+
+/**
+ * What the image service is asked to paint for a wall: the customer's room, with a clear space for
+ * the sign and nothing written anywhere, since the real sign is drawn over it in 3D.
+ */
+export function backdropScene(prompt: string): string {
+  return [
+    `Interior photograph of ${prompt.trim().replace(/[.\s]+$/, '')}.`,
+    'A wall fills the middle of the frame with clear, uncluttered space in the centre where a sign will hang.',
+    'Realistic interior photography, soft evening ambient light, natural textures, gentle depth of field, eye-level wide shot.',
+    'No neon signs, no glowing tubes and no writing of any kind: no letters, words, numbers, logos, posters or watermarks. No people.',
+  ].join(' ');
 }
 
 const COLOR_WORDS: Record<string, string> = {

@@ -195,6 +195,16 @@ describe('AI walls', () => {
     expect(spent).toHaveBeenCalledTimes(1);
   });
 
+  it('does not repeat a refused prompt and tells the customer to reword it', async () => {
+    const refused = vi.fn(() => Promise.reject(new ImageUnavailable('flagged', 0, false, 'flagged')));
+    const { service, database } = serviceWith({ name: 'cloudflare', generate: refused });
+    const job = await settle(service, (await service.startBackdrop(wall, PRIYA)).id, PRIYA);
+    expect(job).toMatchObject({ status: 'failed', error: { status: 422, code: 'ARTWORK_REFUSED' } });
+    expect(refused).toHaveBeenCalledTimes(1);
+    // A refused picture is not counted against the customer.
+    await vi.waitFor(() => expect([...database.counts.values()]).toEqual([0]));
+  });
+
   it('never uses the vector drawing service for a wall', async () => {
     const { service } = serviceWith({ name: 'gemini-svg', generate: vi.fn(photo) });
     const job = await settle(service, (await service.startBackdrop(wall, PRIYA)).id, PRIYA);

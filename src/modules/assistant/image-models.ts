@@ -42,6 +42,11 @@ export class ImageUnavailable extends Error {
     readonly restMs = 0,
     /** True when the account has used up its allowance, rather than a passing failure. */
     readonly quota = false,
+    /**
+     * `transient` may succeed if asked again; `rejected` never will (a malformed request); `flagged`
+     * is the service's safety filter turning the description down, which the customer can reword.
+     */
+    readonly kind: 'transient' | 'rejected' | 'flagged' = 'transient',
   ) {
     super(message);
   }
@@ -274,9 +279,16 @@ export class CloudflareModel implements ImageModel {
         throw new ImageUnavailable('cloudflare: daily allowance used up', untilUtcMidnight(), true);
       }
       if (response.status === 429) throw new ImageUnavailable('cloudflare: busy, try again shortly');
+      // Error 8007: the safety filter refused the prompt. It does so now and then for harmless rooms.
+      if (/"code":\s*8007|NSFW/i.test(detail)) {
+        throw new ImageUnavailable('cloudflare: the safety filter refused the prompt', 0, false, 'flagged');
+      }
       throw new ImageUnavailable(
         `cloudflare returned ${response.status}`,
         [401, 403].includes(response.status) ? HOUR : 0,
+        false,
+        // Other 4xx answers are about the request itself: asking again cannot help.
+        response.status >= 400 && response.status < 500 ? 'rejected' : 'transient',
       );
     }
     const body = (await response.json()) as { result?: { image?: string } };

@@ -62,11 +62,3 @@ export const territorySchema = z.object({
   reassign: z.boolean().default(false),
 });
 export type TerritoryDto = z.infer<typeof territorySchema>;
-
-export const technicianSchema = z.object({
-  name: z.string().trim().min(2).max(80),
-  phone: indianMobileSchema,
-  skills: z.array(z.string().trim().min(2).max(30)).max(10).default([]),
-  isActive: z.boolean().default(true),
-});
-export type TechnicianDto = z.infer<typeof technicianSchema>;

@@ -6,10 +6,13 @@ export type Audience = (typeof AUDIENCES)[number];
 
 export const audienceSchema = z.enum(AUDIENCES);
 
-/** Audiences that sign in with a mobile number and a one-time code (franchise owners can use either). */
-export const PHONE_AUDIENCES = ['customer', 'technician', 'franchise'] as const satisfies readonly Audience[];
-/** Audiences that sign in with an email address and a password. */
-export const PASSWORD_AUDIENCES = ['admin', 'franchise'] as const satisfies readonly Audience[];
+/**
+ * Audiences that sign in with a mobile number and a one-time code (franchise owners can use either).
+ * Customers get a code only once, to confirm their number when they register.
+ */
+export const PHONE_AUDIENCES = ['technician', 'franchise'] as const satisfies readonly Audience[];
+/** Audiences that sign in with a password: by email, or for customers by email or mobile number. */
+export const PASSWORD_AUDIENCES = ['admin', 'franchise', 'customer'] as const satisfies readonly Audience[];
 
 export const toDbAudience = (audience: Audience) => audience.toUpperCase() as AuthAudience;
 

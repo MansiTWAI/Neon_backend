@@ -11,6 +11,7 @@ import { PageQuery, pageOf, skipTake } from '../../../common/http/pagination';
 import { RequestMeta } from '../../../common/http/request-meta';
 import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
+import { overlappingJobs, STARTED_STATUSES } from '../technicians/technician-matching';
 import { letteringOf } from '../../designs/design.dto';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { ImageType, StorageService } from '../../storage/storage.service';
@@ -29,6 +30,8 @@ const paise = (value: bigint) => Number(value);
 
 const QUEUE_FILTERS: Record<OrderQueue, Prisma.OrderWhereInput> = {
   all: {},
+  // Placed to pay online and not paid yet.
+  'awaiting-payment': { status: 'PENDING_PAYMENT' },
   // Cash on delivery still outstanding once the sign has gone out.
   'cash-to-collect': {
     amountDuePaise: { gt: 0 },
@@ -44,6 +47,16 @@ const QUEUE_FILTERS: Record<OrderQueue, Prisma.OrderWhereInput> = {
   production: { status: { in: ['PROOF_APPROVED', 'IN_PRODUCTION', 'QUALITY_CHECK'] } },
   dispatch: { status: { in: ['READY_TO_DISPATCH', 'SHIPPED'] } },
   installation: { installationRequired: true, status: 'DELIVERED' },
+  // Visits nobody has been sent on yet, or that failed and need booking again.
+  'to-assign': {
+    installationJobs: { some: { status: { in: ['UNASSIGNED', 'FAILED'] } } },
+    status: { notIn: ['CANCELLED', 'EXPIRED', 'COMPLETED', 'INSTALLED'] },
+  },
+  // Money received on an order that was then cancelled or lapsed.
+  refunds: {
+    status: { in: ['CANCELLED', 'EXPIRED'] },
+    payments: { some: { status: 'CAPTURED' } },
+  },
   'on-hold': { status: 'ON_HOLD' },
   support: { supportTickets: { some: { status: { in: ['OPEN', 'IN_PROGRESS'] } } } },
   closed: { status: { in: ['COMPLETED', 'CANCELLED', 'EXPIRED'] } },
@@ -69,7 +82,7 @@ const detailInclude = {
     },
   },
   statusHistory: { orderBy: { createdAt: 'asc' } },
-  payments: { orderBy: { createdAt: 'asc' } },
+  payments: { orderBy: { createdAt: 'asc' }, include: { refunds: { orderBy: { createdAt: 'asc' } } } },
   commissions: { include: { franchise: { select: { name: true } } } },
   installationJobs: {
     orderBy: { createdAt: 'desc' },
@@ -146,7 +159,7 @@ export class AdminOrdersService {
     const [technicians, trail] = await Promise.all([
       order.installationRequired
         ? this.prisma.technician.findMany({
-            where: { isActive: true, OR: [{ franchiseId: order.franchiseId }, { franchiseId: null }] },
+            where: { status: 'ACTIVE' },
             orderBy: { name: 'asc' },
             select: { id: true, name: true, phone: true, franchise: { select: { name: true } } },
           })
@@ -178,7 +191,7 @@ export class AdminOrdersService {
         title: `Record the ${formatINR(paise(order.amountDuePaise))} collected before completing the order`,
       });
     }
-    if (dto.to === 'CANCELLED' && order.amountPaidPaise > 0n) {
+    if (dto.to === 'CANCELLED' && order.amountPaidPaise > 0n && order.paymentStatus !== 'REFUNDED') {
       throw new ConflictException({
         code: 'REFUND_REQUIRED',
         title: 'This order has payments against it. Accounts must refund them before it can be cancelled.',
@@ -391,25 +404,39 @@ export class AdminOrdersService {
       });
     }
 
+    // Any active technician can be sent, wherever they are attached; the candidates list ranks them
+    // by area, availability and skills.
     const technician = dto.technicianId
-      ? await this.prisma.technician.findFirst({
-          where: {
-            id: dto.technicianId,
-            isActive: true,
-            OR: [{ franchiseId: order.franchiseId }, { franchiseId: null }],
-          },
-        })
+      ? await this.prisma.technician.findFirst({ where: { id: dto.technicianId, status: 'ACTIVE' } })
       : null;
     if (dto.technicianId && !technician) {
       throw new UnprocessableEntityException({
         code: 'TECHNICIAN_UNAVAILABLE',
-        title: 'Choose a technician from the franchise handling this order',
+        title: 'Choose an active technician',
       });
     }
 
     const job = order.installationJobs[0];
+    if (job && STARTED_STATUSES.includes(job.status)) {
+      throw new ConflictException({
+        code: 'VISIT_UNDER_WAY',
+        title: 'The technician is already on this visit',
+      });
+    }
     const start = dto.scheduledStart;
     const end = start ? new Date(start.getTime() + dto.durationHours * 60 * 60 * 1000) : null;
+    if (technician && start && end) {
+      const clash = await this.prisma.installationJob.findFirst({
+        where: overlappingJobs(technician.id, start, end, job?.id),
+        select: { order: { select: { orderNo: true } } },
+      });
+      if (clash) {
+        throw new ConflictException({
+          code: 'TECHNICIAN_BUSY',
+          title: `${technician.name} already has a visit then (${clash.order.orderNo}). Pick another time or technician.`,
+        });
+      }
+    }
     const rescheduled = Boolean(
       job?.scheduledStart && start && job.scheduledStart.getTime() !== start.getTime(),
     );
@@ -629,6 +656,18 @@ export class AdminOrdersService {
         amountPaise: paise(p.amountPaise),
         reference: p.reference ?? p.gatewayPaymentId,
         at: p.capturedAt ?? p.createdAt,
+        refunds: p.refunds.map((r) => ({
+          id: r.id,
+          amountPaise: paise(r.amountPaise),
+          status: r.status,
+          reason: r.reason,
+          at: r.createdAt,
+        })),
+        refundablePaise:
+          p.status === 'CAPTURED' || p.status === 'PARTIALLY_REFUNDED'
+            ? paise(p.amountPaise) -
+              p.refunds.filter((r) => r.status !== 'FAILED').reduce((sum, r) => sum + paise(r.amountPaise), 0)
+            : 0,
       })),
       commissions: order.commissions.map((c) => ({
         id: c.id,

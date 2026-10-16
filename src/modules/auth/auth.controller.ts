@@ -17,18 +17,24 @@ import { ZodValidationPipe } from '../../common/validation/zod-validation.pipe';
 import { AuthCookies } from './auth-cookies';
 import { AllowWithoutTwoFactor, Authenticated, CurrentAuth } from './auth.decorators';
 import {
+  customerLoginSchema,
   EnableTwoFactorDto,
   enableTwoFactorSchema,
-  PasswordLoginDto,
   passwordLoginSchema,
+  RegisterDto,
+  registerSchema,
   RequestOtpDto,
   requestOtpSchema,
+  ResetPasswordDto,
+  resetPasswordSchema,
   SecondFactorDto,
   secondFactorSchema,
   UpdateProfileDto,
   updateProfileSchema,
   VerifyOtpDto,
   verifyOtpSchema,
+  VerifyRegistrationDto,
+  verifyRegistrationSchema,
 } from './auth.dto';
 import { AuthService, SignedIn } from './auth.service';
 import { AccessClaims, Audience, audienceSchema, PASSWORD_AUDIENCES, PHONE_AUDIENCES } from './auth.types';
@@ -37,6 +43,9 @@ import { ClientInfo } from './session.service';
 const phoneAudience = new ZodValidationPipe(z.enum(PHONE_AUDIENCES));
 const passwordAudience = new ZodValidationPipe(z.enum(PASSWORD_AUDIENCES));
 const anyAudience = new ZodValidationPipe(audienceSchema);
+const customerOnly = new ZodValidationPipe(z.literal('customer'));
+const customerLogin = new ZodValidationPipe(customerLoginSchema);
+const emailLogin = new ZodValidationPipe(passwordLoginSchema);
 
 function clientOf(request: FastifyRequest): ClientInfo {
   return { ip: request.ip, userAgent: request.headers['user-agent'] };
@@ -74,12 +83,64 @@ export class AuthController {
   @HttpCode(200)
   async login(
     @Param('audience', passwordAudience) audience: Audience,
-    @Body(new ZodValidationPipe(passwordLoginSchema)) dto: PasswordLoginDto,
+    @Body() body: unknown,
     @Req() request: FastifyRequest,
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    const result = await this.auth.passwordLogin(audience, dto, clientOf(request));
+    const credentials =
+      audience === 'customer'
+        ? (({ login, password }) => ({ ...login, password }))(customerLogin.transform(body))
+        : emailLogin.transform(body);
+    const result = await this.auth.passwordLogin(audience, credentials, clientOf(request));
     return 'twoFactorRequired' in result ? result : this.respond(reply, audience, result);
+  }
+
+  /** What the shop's sign-in screen may offer, e.g. whether password reset works yet. */
+  @Get('options')
+  signInOptions(@Param('audience', customerOnly) _audience: 'customer') {
+    return this.auth.customerSignInOptions();
+  }
+
+  @Post('register')
+  @HttpCode(202)
+  startRegistration(
+    @Param('audience', customerOnly) _audience: 'customer',
+    @Body(new ZodValidationPipe(registerSchema)) dto: RegisterDto,
+    @Req() request: FastifyRequest,
+  ) {
+    return this.auth.startRegistration(dto, request.ip);
+  }
+
+  @Post('register/verify')
+  @HttpCode(200)
+  async completeRegistration(
+    @Param('audience', customerOnly) audience: 'customer',
+    @Body(new ZodValidationPipe(verifyRegistrationSchema)) dto: VerifyRegistrationDto,
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    return this.respond(reply, audience, await this.auth.completeRegistration(dto, clientOf(request)));
+  }
+
+  @Post('password/forgot')
+  @HttpCode(202)
+  requestPasswordReset(
+    @Param('audience', customerOnly) _audience: 'customer',
+    @Body(new ZodValidationPipe(requestOtpSchema)) { phone }: RequestOtpDto,
+    @Req() request: FastifyRequest,
+  ) {
+    return this.auth.requestPasswordReset(phone, request.ip);
+  }
+
+  @Post('password/reset')
+  @HttpCode(200)
+  async resetPassword(
+    @Param('audience', customerOnly) audience: 'customer',
+    @Body(new ZodValidationPipe(resetPasswordSchema)) dto: ResetPasswordDto,
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    return this.respond(reply, audience, await this.auth.resetPassword(dto, clientOf(request)));
   }
 
   @Post('2fa/verify')

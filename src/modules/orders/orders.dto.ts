@@ -34,10 +34,10 @@ export const placeOrderSchema = z.object({
   installation: z.boolean().default(false),
   couponCode: couponCode.optional(),
   /**
-   * Cash on delivery only, until online payments are switched on. Older storefront builds still
-   * send FULL or ADVANCE; those orders are taken as cash on delivery too rather than refused.
+   * Cash on delivery, or online through the payment gateway when it is set up. Older storefront
+   * builds send FULL or ADVANCE; those are taken as cash on delivery, as they always were.
    */
-  paymentMode: z.literal('COD').catch('COD'),
+  paymentMode: z.enum(['COD', 'ONLINE']).catch('COD'),
   /** Partner code from a franchise's standee QR or link, so the order counts as theirs. */
   referralCode: z
     .string()

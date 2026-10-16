@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { indianMobileSchema, passwordLoginSchema, updateProfileSchema } from './auth.dto';
+import {
+  customerLoginSchema,
+  indianMobileSchema,
+  passwordLoginSchema,
+  registerSchema,
+  updateProfileSchema,
+} from './auth.dto';
 
 describe('indianMobileSchema', () => {
   it.each([
@@ -32,5 +38,43 @@ describe('updateProfileSchema', () => {
 
   it('rejects digits in names', () => {
     expect(updateProfileSchema.safeParse({ name: 'Riya123' }).success).toBe(false);
+  });
+});
+
+describe('customerLoginSchema', () => {
+  it('reads an email or a mobile number', () => {
+    expect(customerLoginSchema.parse({ login: ' Riya@Example.com ', password: 'x' }).login).toEqual({
+      email: 'riya@example.com',
+    });
+    expect(customerLoginSchema.parse({ login: '98123 45678', password: 'x' }).login).toEqual({
+      phone: '+919812345678',
+    });
+  });
+
+  it('rejects anything else', () => {
+    expect(customerLoginSchema.safeParse({ login: 'riya', password: 'x' }).success).toBe(false);
+    expect(customerLoginSchema.safeParse({ login: 'riya@', password: 'x' }).success).toBe(false);
+  });
+});
+
+describe('registerSchema', () => {
+  const valid = {
+    name: 'Riya Sharma',
+    email: 'riya@example.com',
+    phone: '9812345678',
+    password: 'long enough',
+  };
+
+  it('accepts complete details', () => {
+    expect(registerSchema.parse(valid).phone).toBe('+919812345678');
+  });
+
+  it.each([
+    ['a short password', { password: 'short' }],
+    ['a password of spaces', { password: '          ' }],
+    ['a missing email', { email: '' }],
+    ['a bad number', { phone: '12345' }],
+  ])('rejects %s', (_label, change) => {
+    expect(registerSchema.safeParse({ ...valid, ...change }).success).toBe(false);
   });
 });

@@ -5,11 +5,15 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { formatINR, OrderPriceOk } from '@neon-adda/shared';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import { Env } from '../../config/env';
 import { PrismaService } from '../../database/prisma.service';
 import { DesignsService, ResolvedDesign } from '../designs/designs.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OrderWorkflowService } from '../order-workflow/order-workflow.service';
+import { RazorpayGateway } from '../payments/razorpay.gateway';
 import { OrderPricing, PricingService } from '../pricing/pricing.service';
 import { addressSnapshot } from './address-snapshot';
 import { nextOrderNo } from './document-numbers';
@@ -22,14 +26,27 @@ const QUOTE_REASONS: Record<string, string> = {
   NO_RATE: 'needs a custom quotation',
 };
 
+export interface PlacedOrder {
+  orderNo: string;
+  /** True for an online order: the storefront opens the payment window next. */
+  paymentRequired: boolean;
+}
+
+/** How long an identical order request from the same customer counts as a repeat. */
+const REPEAT_WINDOW_MS = 30_000;
+
 @Injectable()
 export class CheckoutService {
+  private readonly recent = new Map<string, { result: Promise<PlacedOrder>; at: number }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly designs: DesignsService,
     private readonly pricing: PricingService,
     private readonly notifications: NotificationsService,
     private readonly workflow: OrderWorkflowService,
+    private readonly gateway: RazorpayGateway,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   async price(dto: CheckoutPriceDto) {
@@ -51,6 +68,8 @@ export class CheckoutService {
         installationAvailable: pricing.zone.installAvailable,
       },
       minOrderValuePaise: pricing.rules.minOrderValuePaise,
+      /** Cash on delivery is always offered; paying online only once the gateway is set up. */
+      paymentMethods: { cod: true, online: this.gateway.configured },
       lines: resolved.map((r) => ({
         description: r.description,
         quoteOnly: r.product.pricingMode === 'QUOTE',
@@ -58,7 +77,36 @@ export class CheckoutService {
     };
   }
 
-  async place(userId: string, dto: PlaceOrderDto): Promise<{ orderNo: string }> {
+  /**
+   * Places the order once even when the same request arrives twice in quick succession: a double
+   * tap on "Place order" or a request the network retried. The repeat gets the first order back.
+   * A request that failed may be sent again straight away.
+   */
+  place(userId: string, dto: PlaceOrderDto): Promise<PlacedOrder> {
+    const now = Date.now();
+    for (const [key, entry] of this.recent) if (now - entry.at > REPEAT_WINDOW_MS) this.recent.delete(key);
+    const key = `${userId}:${createHash('sha256').update(JSON.stringify(dto)).digest('hex')}`;
+    const earlier = this.recent.get(key);
+    if (earlier) return earlier.result;
+    const result = this.placeOnce(userId, dto);
+    this.recent.set(key, { result, at: now });
+    result.catch(() => this.recent.delete(key));
+    return result;
+  }
+
+  /** After a customer cancels, ordering the same thing again places a new order, not the cancelled one. */
+  forgetRecent(userId: string) {
+    for (const key of this.recent.keys()) if (key.startsWith(`${userId}:`)) this.recent.delete(key);
+  }
+
+  private async placeOnce(userId: string, dto: PlaceOrderDto): Promise<PlacedOrder> {
+    const online = dto.paymentMode === 'ONLINE';
+    if (online && !this.gateway.configured) {
+      throw new UnprocessableEntityException({
+        code: 'ONLINE_PAYMENT_UNAVAILABLE',
+        title: 'Online payment is not available right now. Choose cash on delivery.',
+      });
+    }
     const address = await this.prisma.address.findFirst({ where: { id: dto.addressId, userId } });
     if (!address)
       throw new NotFoundException({ code: 'ADDRESS_NOT_FOUND', title: 'Choose a delivery address' });
@@ -120,7 +168,14 @@ export class CheckoutService {
           channel: referrer ? 'KIOSK' : 'WEB',
           franchiseId,
           attributionSource,
-          paymentMode: dto.paymentMode,
+          paymentMode: online ? 'FULL' : 'COD',
+          // An online order waits for its payment, which is only accepted once Razorpay confirms it.
+          status: 'PENDING_PAYMENT',
+          expiresAt: online
+            ? new Date(
+                Date.now() + this.config.get('ONLINE_PAYMENT_WINDOW_MINUTES', { infer: true }) * 60_000,
+              )
+            : null,
           subtotalPaise: BigInt(price.itemsPaise),
           discountPaise: BigInt(price.discountPaise),
           installationPaise: BigInt(price.installationPaise),
@@ -132,7 +187,7 @@ export class CheckoutService {
           roundOffPaise: BigInt(price.roundOffPaise),
           totalPaise: payable,
           amountDuePaise: payable,
-          advanceRequiredPaise: 0n,
+          advanceRequiredPaise: online ? payable : 0n,
           shippingAddress: snapshot,
           billingAddress: snapshot,
           placeOfSupplyState: address.stateCode,
@@ -176,12 +231,17 @@ export class CheckoutService {
           },
         });
       }
-      await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
-        note: 'Order placed, cash on delivery',
-        actorType: 'CUSTOMER',
-      });
+      if (!online) {
+        await this.workflow.confirm(tx, await this.workflow.load(tx, order.id), userId, {
+          note: 'Order placed, cash on delivery',
+          actorType: 'CUSTOMER',
+        });
+      }
       return orderNo;
     });
+
+    // The confirmation for an online order goes out when the payment is confirmed.
+    if (online) return { orderNo, paymentRequired: true };
 
     await this.notifications.notify(
       userId,
@@ -193,7 +253,7 @@ export class CheckoutService {
       },
       ['customer'],
     );
-    return { orderNo };
+    return { orderNo, paymentRequired: false };
   }
 
   /** Every reason an order cannot go through, as a problem the checkout page can show. */

@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../database/prisma.service';
 import { Authenticated, RequirePermissions } from '../../auth/auth.decorators';
 import { AdminOrdersService } from '../orders/admin-orders.service';
@@ -44,6 +45,11 @@ export class AdminDashboardController {
       newLeads,
       daily,
       recent,
+      claimsToReview,
+      techniciansToApprove,
+      unassignedVisits,
+      failedPayments,
+      refundsNeeded,
     ] = await Promise.all([
       this.prisma.order.count({ where: { createdAt: { gte: today } } }),
       this.prisma.order.count({ where: { createdAt: { gte: month } } }),
@@ -77,13 +83,43 @@ export class AdminDashboardController {
           customer: { select: { name: true, phone: true } },
         },
       }),
+      this.prisma.commissionClaim.count({ where: { status: 'SUBMITTED' } }),
+      this.prisma.technician.count({ where: { status: 'PENDING' } }),
+      this.prisma.installationJob.count({
+        where: {
+          status: { in: ['UNASSIGNED', 'FAILED'] },
+          order: { status: { notIn: ['CANCELLED', 'EXPIRED', 'COMPLETED', 'INSTALLED'] } },
+        },
+      }),
+      // Online orders whose payment attempt failed and are still waiting, in the last week.
+      this.prisma.order.count({
+        where: {
+          status: 'PENDING_PAYMENT',
+          createdAt: { gte: istMidnight(6) },
+          payments: { some: { method: 'RAZORPAY', raw: { path: ['lastFailure'], not: Prisma.AnyNull } } },
+        },
+      }),
+      // Money received on orders that were then cancelled, not yet (fully) refunded.
+      this.prisma.payment.count({
+        where: { status: 'CAPTURED', order: { status: { in: ['CANCELLED', 'EXPIRED'] } } },
+      }),
     ]);
 
     const byDay = new Map(daily.map((row) => [row.day, Number(row.amount)]));
     return {
       today: { orders: ordersToday, collectedPaise: Number(paidToday._sum.amountPaise ?? 0) },
       month: { orders: ordersMonth, collectedPaise: Number(paidMonth._sum.amountPaise ?? 0) },
-      queues: { ...queues, quotesToPrepare: openQuotes, openTickets, newLeads },
+      queues: {
+        ...queues,
+        quotesToPrepare: openQuotes,
+        openTickets,
+        newLeads,
+        claimsToReview,
+        techniciansToApprove,
+        unassignedVisits,
+        failedPayments,
+        refundsNeeded,
+      },
       collections: Array.from({ length: 14 }, (_, i) => {
         const day = new Date(fortnight.getTime() + IST_OFFSET_MS + i * DAY).toISOString().slice(0, 10);
         return { day, amountPaise: byDay.get(day) ?? 0 };

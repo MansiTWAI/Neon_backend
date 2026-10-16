@@ -10,3 +10,8 @@ export async function nextQuoteNo(tx: Prisma.TransactionClient): Promise<string>
   const [row] = await tx.$queryRaw<[{ value: bigint }]>`SELECT nextval('quote_no_seq') AS value`;
   return `QT${row.value}`;
 }
+
+export async function nextClaimNo(tx: Prisma.TransactionClient): Promise<string> {
+  const [row] = await tx.$queryRaw<[{ value: bigint }]>`SELECT nextval('claim_no_seq') AS value`;
+  return `CLM${row.value}`;
+}

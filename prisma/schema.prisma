@@ -199,10 +199,31 @@ enum CommissionKind {
 enum CommissionStatus {
   PENDING
   ELIGIBLE
+  /// In a claim the franchise has made, waiting for the accounts team.
+  CLAIMED
   APPROVED
   PAID
   REVERSED
   ON_HOLD
+  /// The accounts team questioned the claim; it waits for more evidence or a decision.
+  DISPUTED
+}
+
+enum ClaimStatus {
+  /// Being put together by the franchise: commissions are reserved, evidence is being added.
+  DRAFT
+  SUBMITTED
+  DISPUTED
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum TechnicianStatus {
+  /// Added but not yet approved to take jobs.
+  PENDING
+  ACTIVE
+  SUSPENDED
 }
 
 enum PayoutStatus {
@@ -1104,6 +1125,7 @@ model Franchise {
   kioskDevices     KioskDevice[]
   commissionRules  CommissionRule[]
   commissions      Commission[]
+  claims           CommissionClaim[]
   payouts          Payout[]
   orders           Order[]
   quotations       Quotation[]
@@ -1170,13 +1192,63 @@ model Commission {
   createdAt    DateTime          @default(now()) @db.Timestamptz
   updatedAt    DateTime          @updatedAt @db.Timestamptz
 
-  order     Order     @relation(fields: [orderId], references: [id])
-  franchise Franchise @relation(fields: [franchiseId], references: [id])
-  payout    Payout?   @relation(fields: [payoutId], references: [id])
+  /// The claim this commission is in, while that claim is open or once it was approved.
+  claimId String? @db.Uuid
+
+  order     Order            @relation(fields: [orderId], references: [id])
+  franchise Franchise        @relation(fields: [franchiseId], references: [id])
+  payout    Payout?          @relation(fields: [payoutId], references: [id])
+  claim     CommissionClaim? @relation(fields: [claimId], references: [id])
 
   @@unique([orderId, kind, seq])
   @@index([franchiseId, status])
+  @@index([claimId])
   @@map("commissions")
+}
+
+/// A franchise asking to be paid for eligible commissions, with evidence the accounts team checks.
+model CommissionClaim {
+  id                  String      @id @default(uuid(7)) @db.Uuid
+  claimNo             String      @unique @db.VarChar(20)
+  franchiseId         String      @db.Uuid
+  status              ClaimStatus @default(DRAFT)
+  amountPaise         BigInt
+  note                String?
+  submittedBy         String?     @db.Uuid
+  submittedAt         DateTime?   @db.Timestamptz
+  reviewedBy          String?     @db.Uuid
+  reviewedAt          DateTime?   @db.Timestamptz
+  reviewNote          String?
+  /// The bank or ledger reference the accounts team matched the evidence against.
+  reconciledReference String?     @db.VarChar(60)
+  createdAt           DateTime    @default(now()) @db.Timestamptz
+  updatedAt           DateTime    @updatedAt @db.Timestamptz
+
+  franchise   Franchise       @relation(fields: [franchiseId], references: [id])
+  commissions Commission[]
+  evidence    ClaimEvidence[]
+
+  @@index([franchiseId, status])
+  @@index([status, submittedAt])
+  @@map("commission_claims")
+}
+
+/// A bank statement or receipt for a claim. Kept in the database, never at a public address, and
+/// only shown to the claim's franchise and to staff who review claims.
+model ClaimEvidence {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  claimId    String   @db.Uuid
+  fileName   String   @db.VarChar(120)
+  mime       String   @db.VarChar(60)
+  bytes      Int
+  data       Bytes
+  uploadedBy String?  @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz
+
+  claim CommissionClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@map("claim_evidence")
 }
 
 model Payout {
@@ -1206,15 +1278,20 @@ model Payout {
 // ───────────────────────────── Field service ─────────────────────────────
 
 model Technician {
-  id          String   @id @default(uuid(7)) @db.Uuid
-  franchiseId String?  @db.Uuid
-  userId      String?  @unique @db.Uuid
-  name        String   @db.VarChar(80)
-  phone       String   @unique @db.VarChar(15)
-  photoKey    String?
-  skills      String[]
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now()) @db.Timestamptz
+  id              String           @id @default(uuid(7)) @db.Uuid
+  franchiseId     String?          @db.Uuid
+  userId          String?          @unique @db.Uuid
+  name            String           @db.VarChar(80)
+  phone           String           @unique @db.VarChar(15)
+  photoKey        String?
+  skills          String[]
+  /// Kept in step with status (ACTIVE), for the sign-in and job checks that read it.
+  isActive        Boolean          @default(true)
+  status          TechnicianStatus @default(ACTIVE)
+  /// Where they work: a city, and the pincodes they cover (empty means the whole city).
+  serviceCity     String?          @db.VarChar(80)
+  servicePincodes String[]         @default([])
+  createdAt       DateTime         @default(now()) @db.Timestamptz
 
   franchise Franchise?        @relation(fields: [franchiseId], references: [id])
   user      User?             @relation(fields: [userId], references: [id])

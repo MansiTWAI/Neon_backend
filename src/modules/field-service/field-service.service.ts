@@ -12,6 +12,7 @@ import { Env } from '../../config/env';
 import { PrismaService } from '../../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AddressSnapshot } from '../orders/address-snapshot';
+import { letteringOf } from '../designs/design.dto';
 import { ImageType, StorageService } from '../storage/storage.service';
 import { completionCode } from './completion-code';
 import { CompleteJobDto, FailJobDto, JobListQuery, JobStep } from './field-service.dto';
@@ -59,7 +60,7 @@ const jobInclude = {
           widthIn: true,
           heightIn: true,
           qty: true,
-          design: { select: { previewKey: true } },
+          design: { select: { previewKey: true, config: true } },
         },
       },
     },
@@ -112,6 +113,8 @@ export class FieldServiceService {
         heightIn: Number(item.heightIn),
         qty: item.qty,
         previewUrl: this.storage.url(item.design?.previewKey),
+        // The words, font and colours, so the installer can see the sign when there is no picture.
+        lettering: letteringOf(item.design?.config),
       })),
       photos: job.photos.map((photo) => ({
         id: photo.id,

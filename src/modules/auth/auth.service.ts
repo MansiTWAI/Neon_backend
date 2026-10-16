@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -9,16 +10,19 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { hash, verify } from '@node-rs/argon2';
 import { Prisma, UserType } from '@prisma/client';
-import { randomToken } from '../../common/security/crypto';
+import { IpRateLimiter } from '../../common/http/ip-rate-limiter';
+import { decrypt, encrypt, randomToken } from '../../common/security/crypto';
 import { Env } from '../../config/env';
 import { PrismaService } from '../../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   EnableTwoFactorDto,
-  PasswordLoginDto,
+  RegisterDto,
+  ResetPasswordDto,
   SecondFactorDto,
   UpdateProfileDto,
   VerifyOtpDto,
+  VerifyRegistrationDto,
 } from './auth.dto';
 import { AccessClaims, Audience } from './auth.types';
 import { OtpService } from './otp.service';
@@ -29,6 +33,18 @@ import { TwoFactorService } from './two-factor.service';
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MS = 15 * 60_000;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
+/** Longer than the code sent with it, which expires first. */
+const REGISTRATION_TTL_SECONDS = 10 * 60;
+
+/** What someone registering entered, held (encrypted) in the challenge until their number is confirmed. */
+interface PendingRegistration {
+  name: string;
+  email: string;
+  passwordHash: string;
+}
+
+/** Who is signing in with a password: staff and partners by email, customers by email or mobile. */
+export type PasswordCredentials = { email?: string; phone?: string; password: string };
 
 const USER_TYPE_FOR: Record<Audience, UserType> = {
   customer: 'CUSTOMER',
@@ -65,6 +81,10 @@ export type PasswordLoginResult = SignedIn | { twoFactorRequired: true; challeng
 export class AuthService {
   /** Verified against when the email is unknown, so response time does not reveal which accounts exist. */
   private decoyHash: Promise<string> = hash(randomToken());
+  private readonly sealKey: Buffer;
+  private readonly registrations = new IpRateLimiter(10, 15 * 60_000);
+  private readonly passwordAttempts = new IpRateLimiter(30, 15 * 60_000);
+  private readonly resets = new IpRateLimiter(5, 15 * 60_000);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -74,14 +94,18 @@ export class AuthService {
     private readonly twoFactor: TwoFactorService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService<Env, true>,
-  ) {}
+  ) {
+    const encodedKey: string = config.get('ENCRYPTION_KEY', { infer: true });
+    this.sealKey = Buffer.from(encodedKey, 'base64');
+  }
 
   async requestOtp(audience: Audience, phone: string, ip?: string) {
+    // Customers confirm their number once, when they register, and then sign in with a password.
+    if (audience === 'customer') throw this.usePassword();
     const canSignIn =
-      audience === 'customer' ||
-      (audience === 'technician'
+      audience === 'technician'
         ? (await this.prisma.technician.count({ where: { phone, isActive: true } })) > 0
-        : (await this.franchiseOwnerFor(phone)) !== null);
+        : (await this.franchiseOwnerFor(phone)) !== null;
     // Normally an unknown number gets the same answer as a registered one, so the endpoint does not
     // reveal who is registered. While every number shares the preview code that protects nothing, and
     // a plain answer saves people from waiting for a code that is never coming.
@@ -90,7 +114,7 @@ export class AuthService {
         code: 'NOT_REGISTERED',
         title:
           audience === 'technician'
-            ? 'This number is not registered. Ask your franchise to add you as a technician.'
+            ? 'This number is not an active technician. Ask the Neon Adda team to add or approve you.'
             : 'This number is not registered as a franchise phone. Sign in with your email instead.',
       });
     }
@@ -98,13 +122,10 @@ export class AuthService {
   }
 
   async verifyOtp(audience: Audience, { phone, code }: VerifyOtpDto, client: ClientInfo): Promise<SignedIn> {
+    if (audience === 'customer') throw this.usePassword();
     await this.otp.verify(phone, audience, code);
     const userId =
-      audience === 'customer'
-        ? await this.customerFor(phone)
-        : audience === 'technician'
-          ? await this.technicianUserFor(phone)
-          : await this.franchiseOwnerFor(phone);
+      audience === 'technician' ? await this.technicianUserFor(phone) : await this.franchiseOwnerFor(phone);
     if (!userId)
       throw new UnauthorizedException({ code: 'ACCOUNT_DISABLED', title: 'This number is not registered' });
     return this.signIn(userId, audience, client);
@@ -112,16 +133,19 @@ export class AuthService {
 
   async passwordLogin(
     audience: Audience,
-    { email, password }: PasswordLoginDto,
+    { email, phone, password }: PasswordCredentials,
     client: ClientInfo,
   ): Promise<PasswordLoginResult> {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    this.passwordAttempts.take(client.ip);
+    // Only customers sign in with a mobile number and a password; the other apps use email.
+    const where = email ? { email } : phone && audience === 'customer' ? { phone } : null;
+    const user = where ? await this.prisma.user.findUnique({ where }) : null;
     const usable =
       user && user.type === USER_TYPE_FOR[audience] && user.status === 'ACTIVE' && user.passwordHash;
 
     if (!usable) {
       await verify(await this.decoyHash, password);
-      throw this.invalidCredentials();
+      throw this.invalidCredentials(audience);
     }
     if (user.lockedUntil && user.lockedUntil > new Date()) {
       throw new HttpException(
@@ -139,7 +163,7 @@ export class AuthService {
           lockedUntil: failed >= MAX_FAILED_LOGINS ? new Date(Date.now() + LOCKOUT_MS) : null,
         },
       });
-      throw this.invalidCredentials();
+      throw this.invalidCredentials(audience);
     }
 
     await this.prisma.user.update({
@@ -155,6 +179,99 @@ export class AuthService {
       return { twoFactorRequired: true, challenge };
     }
     return this.signIn(user.id, audience, client);
+  }
+
+  /**
+   * First step of a customer registration: checks the details, sends a code to the number and returns
+   * a challenge holding the details (password already hashed, all of it encrypted) until the code is
+   * entered. Nothing is saved yet, so an abandoned registration leaves nothing behind.
+   */
+  async startRegistration({ name, email, phone, password }: RegisterDto, ip?: string) {
+    this.registrations.take(ip);
+    await this.assertCanRegister(phone, email);
+
+    const pending: PendingRegistration = { name, email, passwordHash: await hash(password) };
+    const challenge = await this.tokens.signChallenge(
+      {
+        sub: phone,
+        aud: 'customer',
+        purpose: 'registration',
+        sealed: encrypt(JSON.stringify(pending), this.sealKey).toString('base64'),
+      },
+      REGISTRATION_TTL_SECONDS,
+    );
+    const dispatch = await this.otp.send(phone, 'customer', ip);
+    return { ...dispatch, challenge, phone };
+  }
+
+  /** Second step: the code proves the number is theirs; the account is created and signed in. */
+  async completeRegistration(
+    { challenge, code }: VerifyRegistrationDto,
+    client: ClientInfo,
+  ): Promise<SignedIn> {
+    const { sub: phone, sealed } = await this.tokens.verifyChallenge(challenge, 'customer', 'registration');
+    if (!sealed) throw new UnauthorizedException({ code: 'CHALLENGE_INVALID', title: 'Please start again' });
+    await this.otp.verify(phone, 'customer', code);
+
+    const pending = JSON.parse(decrypt(Buffer.from(sealed, 'base64'), this.sealKey)) as PendingRegistration;
+    // Checked again: the number or email may have been taken while the code was on its way.
+    const existing = await this.assertCanRegister(phone, pending.email);
+    const data = {
+      name: pending.name,
+      email: pending.email,
+      passwordHash: pending.passwordHash,
+      failedLoginCount: 0,
+      lockedUntil: null,
+    };
+    let userId: string;
+    try {
+      // A customer who used to sign in with codes only keeps their orders and now has a password.
+      userId = existing
+        ? (await this.prisma.user.update({ where: { id: existing.id }, data })).id
+        : (await this.prisma.user.create({ data: { ...data, phone, type: 'CUSTOMER' } })).id;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw this.alreadyRegistered();
+      }
+      throw error;
+    }
+    return this.signIn(userId, 'customer', client);
+  }
+
+  /** Sends a code to reset a forgotten password. Unknown numbers get the same answer, and no message. */
+  async requestPasswordReset(phone: string, ip?: string) {
+    this.assertResetAvailable();
+    this.resets.take(ip);
+    const user = await this.prisma.user.findUnique({ where: { phone } });
+    const known = Boolean(user && user.type === 'CUSTOMER' && user.status === 'ACTIVE');
+    return this.otp.send(phone, 'customer', ip, known);
+  }
+
+  /** Sets a new password once the code is right, ends every other session and signs in. */
+  async resetPassword({ phone, code, password }: ResetPasswordDto, client: ClientInfo): Promise<SignedIn> {
+    this.assertResetAvailable();
+    await this.otp.verify(phone, 'customer', code);
+    const user = await this.prisma.user.findUnique({ where: { phone } });
+    if (!user || user.type !== 'CUSTOMER' || user.status !== 'ACTIVE') {
+      throw this.invalidCredentials('customer');
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash: await hash(password), failedLoginCount: 0, lockedUntil: null },
+      }),
+      this.prisma.session.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    return this.signIn(user.id, 'customer', client);
+  }
+
+  /** What the shop's sign-in screen may offer. */
+  customerSignInOptions() {
+    return { passwordReset: !this.otp.inPreview };
   }
 
   async verifySecondFactor(
@@ -377,19 +494,55 @@ export class AuthService {
     ].sort();
   }
 
-  private async customerFor(phone: string): Promise<string> {
-    const user = await this.prisma.user.upsert({
-      where: { phone },
-      update: {},
-      create: { phone, type: 'CUSTOMER' },
-      select: { id: true, type: true },
-    });
-    if (user.type !== 'CUSTOMER')
-      throw new UnauthorizedException({ code: 'ACCOUNT_DISABLED', title: 'Use your work app to sign in' });
-    return user.id;
+  /**
+   * Refuses a number or email that already belongs to an account with a password. Returns the
+   * account of a customer who signed in with codes only, so registering gives it a password.
+   */
+  private async assertCanRegister(phone: string, email: string) {
+    const [byPhone, byEmail] = await Promise.all([
+      this.prisma.user.findUnique({ where: { phone } }),
+      this.prisma.user.findUnique({ where: { email } }),
+    ]);
+    if (byPhone && (byPhone.type !== 'CUSTOMER' || byPhone.passwordHash || byPhone.status !== 'ACTIVE')) {
+      throw this.alreadyRegistered();
+    }
+    if (byEmail && byEmail.id !== byPhone?.id) {
+      throw new ConflictException({ code: 'EMAIL_TAKEN', title: 'That email is used by another account' });
+    }
+    return byPhone;
   }
 
-  /** Technicians are registered by their franchise; their login is created on first sign-in. */
+  /**
+   * While WhatsApp is not connected every number shares the same code, so a reset would let anyone
+   * take over any account. Resets wait until real codes are sent.
+   */
+  private assertResetAvailable() {
+    if (this.otp.inPreview) {
+      throw new HttpException(
+        {
+          code: 'RESET_UNAVAILABLE',
+          title: 'Password reset is not available yet. Contact us and we will help you sign in.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+  }
+
+  private alreadyRegistered() {
+    return new ConflictException({
+      code: 'ALREADY_REGISTERED',
+      title: 'This mobile number is already registered. Sign in with your password.',
+    });
+  }
+
+  private usePassword() {
+    return new BadRequestException({
+      code: 'USE_PASSWORD',
+      title: 'Sign in with your email or mobile number and your password.',
+    });
+  }
+
+  /** Technicians are added and approved by the admin team; their login is created on first sign-in. */
   private async technicianUserFor(phone: string): Promise<string> {
     const technician = await this.prisma.technician.findUnique({ where: { phone } });
     if (!technician?.isActive)
@@ -418,10 +571,13 @@ export class AuthService {
     return franchise?.ownerUserId ?? null;
   }
 
-  private invalidCredentials() {
+  private invalidCredentials(audience: Audience) {
     return new UnauthorizedException({
       code: 'INVALID_CREDENTIALS',
-      title: 'Email or password is incorrect',
+      title:
+        audience === 'customer'
+          ? 'Those details are not right. Check your email or mobile number and your password.'
+          : 'Email or password is incorrect',
     });
   }
 }

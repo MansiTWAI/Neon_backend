@@ -6,13 +6,13 @@ import { AccessClaims, ACCESS_TTL_SECONDS, Audience } from './auth.types';
 
 const ISSUER = 'neon-adda';
 
-type ChallengePurpose = 'second-factor' | 'totp-setup';
+type ChallengePurpose = 'second-factor' | 'totp-setup' | 'registration';
 
 interface ChallengeClaims {
   sub: string;
   aud: Audience;
   purpose: ChallengePurpose;
-  /** Encrypted TOTP secret, only present on setup challenges. */
+  /** Encrypted payload: the TOTP secret on setup challenges, the new account on registration ones. */
   sealed?: string;
 }
 

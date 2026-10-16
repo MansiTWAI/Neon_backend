@@ -68,8 +68,11 @@ const PERMISSIONS = [
   'commission.read',
   'commission.write',
   'commission.approve',
+  'claims.review',
   'payouts.write',
   'payments.write',
+  'technicians.read',
+  'technicians.write',
   'catalog.write',
   'users.read',
   'users.write',
@@ -91,6 +94,8 @@ const ROLES: { key: string; name: string; permissions: readonly Permission[] }[]
       'customers.read',
       'franchises.read',
       'pricing.read',
+      'technicians.read',
+      'technicians.write',
     ],
   },
   {
@@ -117,6 +122,7 @@ const ROLES: { key: string; name: string; permissions: readonly Permission[] }[]
       'pricing.read',
       'commission.read',
       'commission.approve',
+      'claims.review',
       'payouts.write',
       'payments.write',
     ],
@@ -751,7 +757,14 @@ async function seedDevelopmentAccounts(franchiseId: string) {
   await prisma.technician.upsert({
     where: { phone: '+919000000001' },
     update: {},
-    create: { name: 'Ravi Kumar', phone: '+919000000001', franchiseId, skills: ['installation', 'wiring'] },
+    create: {
+      name: 'Ravi Kumar',
+      phone: '+919000000001',
+      franchiseId,
+      skills: ['installation', 'wiring'],
+      serviceCity: 'Pune',
+      servicePincodes: ['411004', '411016'],
+    },
   });
 
   console.log(`Development accounts ready (password for ops and partner: ${DEV_PASSWORD}).`);

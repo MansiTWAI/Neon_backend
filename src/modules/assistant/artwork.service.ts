@@ -1,5 +1,12 @@
 import { NEON_FONT_FAMILIES } from '@neon-adda/shared';
-import { HttpException, HttpStatus, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -509,6 +516,7 @@ export class ArtworkService {
     options: { skip?: Set<string>; timeoutMs?: number; retries?: number } = {},
   ) {
     let last: ImageUnavailable | null = null;
+    let flagged = false;
     for (const painter of this.painters) {
       if (options.skip?.has(painter.name)) continue;
       for (let attempt = 0; attempt <= (options.retries ?? 0); attempt++) {
@@ -521,13 +529,21 @@ export class ArtworkService {
           this.logger.warn(error.message);
           if (error.restMs) this.resting.set(painter.name, Date.now() + error.restMs);
           last = error;
+          if (error.kind === 'flagged') flagged = true;
           // Only a passing hiccup is worth asking the same service again, after a short pause.
-          if (error.restMs || error.quota) break;
+          if (error.restMs || error.quota || error.kind !== 'transient') break;
           if (attempt < (options.retries ?? 0)) await pause(RETRY_PAUSE_MS * (attempt + 1));
         }
       }
     }
     this.logger.warn(`no image service answered${last ? '' : ' (all resting)'}`);
+    if (flagged) {
+      throw new UnprocessableEntityException({
+        code: 'ARTWORK_REFUSED',
+        title:
+          'The AI’s safety filter turned that description down. Describe the room a little differently and try again.',
+      });
+    }
     if (last?.quota) {
       throw new HttpException(
         {

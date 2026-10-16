@@ -10,6 +10,7 @@ import { pageOf, skipTake } from '../../../common/http/pagination';
 import { RequestMeta } from '../../../common/http/request-meta';
 import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
+import { promoteEligibleCommission } from '../../claims/commission-ledger';
 import { CommissionRuleDto, CommissionSettingsDto, LedgerQuery, MarkPaidDto } from './admin-commission.dto';
 
 const paise = (value: bigint | null | undefined) => Number(value ?? 0);
@@ -106,6 +107,7 @@ export class AdminCommissionService {
           franchise: { select: { id: true, name: true } },
           order: { select: { orderNo: true, status: true, createdAt: true } },
           payout: { select: { id: true, status: true } },
+          claim: { select: { id: true, claimNo: true, status: true } },
         },
       }),
       this.prisma.commission.count({ where }),
@@ -130,6 +132,7 @@ export class AdminCommissionService {
           eligibleAt: row.eligibleAt,
           approvedAt: row.approvedAt,
           payout: row.payout,
+          claim: row.claim,
         })),
         total,
         query,
@@ -308,6 +311,15 @@ export class AdminCommissionService {
           data: { status: 'PAID', utr: dto.utr, mode: dto.mode, paidAt: new Date() },
         });
         await tx.commission.updateMany({ where: { payoutId: payout.id }, data: { status: 'PAID' } });
+        // A claim is paid once every commission in it (that was not reversed) has been paid.
+        await tx.commissionClaim.updateMany({
+          where: {
+            status: 'APPROVED',
+            commissions: { some: { payoutId: payout.id } },
+            NOT: { commissions: { some: { status: { notIn: ['PAID', 'REVERSED'] } } } },
+          },
+          data: { status: 'PAID' },
+        });
         await this.audit.record(
           { actorId, action: 'payout.paid', entity: 'payout', entityId: id, after: dto, ...meta },
           tx,
@@ -365,12 +377,8 @@ export class AdminCommissionService {
     return this.settings();
   }
 
-  /** Commission becomes payable once its return window has passed. */
   private promoteEligible() {
-    return this.prisma.commission.updateMany({
-      where: { status: 'PENDING', eligibleAt: { lte: new Date() } },
-      data: { status: 'ELIGIBLE' },
-    });
+    return promoteEligibleCommission(this.prisma);
   }
 
   private async draftPayout(id: string) {

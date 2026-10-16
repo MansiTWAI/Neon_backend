@@ -169,6 +169,30 @@ describe('CloudflareModel', () => {
     expect(error.restMs).toBe(0);
   });
 
+  it('marks a safety-filter refusal as something the customer can reword, not a passing failure', async () => {
+    stubFetch(
+      new Response(
+        JSON.stringify({ errors: [{ code: 8007, message: 'AiError: Input prompt contains NSFW content.' }] }),
+        { status: 400 },
+      ),
+    );
+    const error = (await new CloudflareModel('a', 't')
+      .generate({ prompt: 'x', aspect: 'square', seed: 1 })
+      .catch((e: unknown) => e)) as ImageUnavailable;
+    expect(error.kind).toBe('flagged');
+    expect(error.quota).toBe(false);
+  });
+
+  it('does not treat a rejected request as worth repeating', async () => {
+    stubFetch(
+      new Response(JSON.stringify({ errors: [{ code: 5006, message: 'bad input' }] }), { status: 400 }),
+    );
+    const error = (await new CloudflareModel('a', 't')
+      .generate({ prompt: 'x', aspect: 'square', seed: 1 })
+      .catch((e: unknown) => e)) as ImageUnavailable;
+    expect(error.kind).toBe('rejected');
+  });
+
   it('rests for an hour on a wrong token', async () => {
     stubFetch(new Response('{}', { status: 401 }));
     const error = (await new CloudflareModel('a', 't')

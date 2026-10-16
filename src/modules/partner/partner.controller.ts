@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Query } from '@nestjs/common';
 import { ruleScore } from '@neon-adda/shared';
 import { Meta, type RequestMeta } from '../../common/http/request-meta';
 import { ZodValidationPipe } from '../../common/validation/zod-validation.pipe';
@@ -7,16 +7,12 @@ import { Authenticated, CurrentAuth } from '../auth/auth.decorators';
 import { AccessClaims } from '../auth/auth.types';
 import { orderNoSchema } from '../orders/orders.dto';
 import {
-  PartnerInstallationDto,
-  partnerInstallationSchema,
   PartnerLeadListQuery,
   partnerLeadListSchema,
   PartnerLeadUpdateDto,
   partnerLeadUpdateSchema,
   PartnerOrderListQuery,
   partnerOrderListSchema,
-  PartnerTechnicianDto,
-  partnerTechnicianSchema,
 } from './partner.dto';
 import { PartnerService } from './partner.service';
 
@@ -49,43 +45,10 @@ export class PartnerController {
     return this.partner.order(auth.fid!, no);
   }
 
-  @Put('orders/:orderNo/installation')
-  scheduleInstallation(
-    @CurrentAuth() auth: AccessClaims,
-    @Param('orderNo', orderNo) no: string,
-    @Body(new ZodValidationPipe(partnerInstallationSchema)) dto: PartnerInstallationDto,
-    @Meta() meta: RequestMeta,
-  ) {
-    return this.partner.scheduleInstallation(auth.sub, auth.fid!, no, dto, meta);
-  }
-
+  /** Read-only: the admin team books visits and assigns technicians. */
   @Get('installations')
   installations(@CurrentAuth() auth: AccessClaims) {
     return this.partner.installations(auth.fid!);
-  }
-
-  @Get('technicians')
-  technicians(@CurrentAuth() auth: AccessClaims) {
-    return this.partner.technicians(auth.fid!);
-  }
-
-  @Post('technicians')
-  addTechnician(
-    @CurrentAuth() auth: AccessClaims,
-    @Body(new ZodValidationPipe(partnerTechnicianSchema)) dto: PartnerTechnicianDto,
-    @Meta() meta: RequestMeta,
-  ) {
-    return this.partner.saveTechnician(auth.sub, auth.fid!, null, dto, meta);
-  }
-
-  @Put('technicians/:id')
-  updateTechnician(
-    @CurrentAuth() auth: AccessClaims,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(partnerTechnicianSchema)) dto: PartnerTechnicianDto,
-    @Meta() meta: RequestMeta,
-  ) {
-    return this.partner.saveTechnician(auth.sub, auth.fid!, id, dto, meta);
   }
 
   @Get('leads')

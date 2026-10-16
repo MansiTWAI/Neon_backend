@@ -6,7 +6,7 @@ import { temporaryPassword } from '../../../common/security/temporary-password';
 import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { translateUnique } from '../pricing/admin-pricing.service';
-import { CreateFranchiseDto, FranchiseDto, TechnicianDto, TerritoryDto } from './admin-franchises.dto';
+import { CreateFranchiseDto, FranchiseDto, TerritoryDto } from './admin-franchises.dto';
 
 const paise = (value: bigint | null | undefined) => Number(value ?? 0);
 
@@ -217,42 +217,6 @@ export class AdminFranchisesService {
       );
     });
     return this.detail(id);
-  }
-
-  async saveTechnician(
-    actorId: string,
-    franchiseId: string,
-    technicianId: string | null,
-    dto: TechnicianDto,
-    meta: RequestMeta,
-  ) {
-    await this.exists(franchiseId);
-    if (technicianId) {
-      const owned = await this.prisma.technician.count({ where: { id: technicianId, franchiseId } });
-      if (!owned)
-        throw new NotFoundException({ code: 'TECHNICIAN_NOT_FOUND', title: 'Technician not found' });
-    }
-    try {
-      await this.prisma.$transaction(async (tx) => {
-        const technician = technicianId
-          ? await tx.technician.update({ where: { id: technicianId }, data: dto })
-          : await tx.technician.create({ data: { ...dto, franchiseId } });
-        await this.audit.record(
-          {
-            actorId,
-            action: technicianId ? 'technician.updated' : 'technician.added',
-            entity: 'franchise',
-            entityId: franchiseId,
-            after: { technicianId: technician.id, ...dto },
-            ...meta,
-          },
-          tx,
-        );
-      });
-    } catch (error) {
-      throw translateUnique(error, 'This mobile number is already registered to a technician');
-    }
-    return this.detail(franchiseId);
   }
 
   /** Issues a new temporary password and signs the owner out everywhere. */

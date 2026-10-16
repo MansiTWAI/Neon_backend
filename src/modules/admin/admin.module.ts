@@ -16,6 +16,8 @@ import { AdminPricingController } from './pricing/admin-pricing.controller';
 import { AdminPricingService } from './pricing/admin-pricing.service';
 import { AdminQuotationsController } from './quotations/admin-quotations.controller';
 import { AdminQuotationsService } from './quotations/admin-quotations.service';
+import { AdminTechniciansController } from './technicians/admin-technicians.controller';
+import { AdminTechniciansService } from './technicians/admin-technicians.service';
 
 /** Back-office API for the admin panel. Every route requires an admin session and a permission. */
 @Module({
@@ -30,6 +32,7 @@ import { AdminQuotationsService } from './quotations/admin-quotations.service';
     AdminPricingController,
     AdminFranchisesController,
     AdminCommissionController,
+    AdminTechniciansController,
   ],
   providers: [
     AdminOrdersService,
@@ -37,6 +40,7 @@ import { AdminQuotationsService } from './quotations/admin-quotations.service';
     AdminPricingService,
     AdminFranchisesService,
     AdminCommissionService,
+    AdminTechniciansService,
   ],
 })
 export class AdminModule {}

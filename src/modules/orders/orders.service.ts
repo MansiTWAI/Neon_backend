@@ -4,6 +4,7 @@ import { CUSTOMER_CANCELLABLE, REVIEWABLE } from '@neon-adda/shared';
 import { Prisma } from '@prisma/client';
 import { Env } from '../../config/env';
 import { PrismaService } from '../../database/prisma.service';
+import { CheckoutService } from './checkout.service';
 import { letteringOf } from '../designs/design.dto';
 import { completionCode } from '../field-service/completion-code';
 import { OrderWorkflowService } from '../order-workflow/order-workflow.service';
@@ -44,6 +45,7 @@ export class OrdersService {
     private readonly storage: StorageService,
     private readonly workflow: OrderWorkflowService,
     private readonly config: ConfigService<Env, true>,
+    private readonly checkout: CheckoutService,
   ) {}
 
   async list(userId: string) {
@@ -110,6 +112,7 @@ export class OrdersService {
       cancelledAt: new Date(),
       cancelReason: dto.reason,
     });
+    this.checkout.forgetRecent(userId);
     return this.detail(userId, orderNo);
   }
 
@@ -251,6 +254,8 @@ export class OrdersService {
       status: order.status,
       paymentStatus: order.paymentStatus,
       paymentMode: order.paymentMode,
+      /** For an order waiting for online payment: when it lapses. */
+      expiresAt: order.status === 'PENDING_PAYMENT' ? order.expiresAt : null,
       placedAt: order.createdAt,
       cancelledAt: order.cancelledAt,
       cancelReason: order.cancelReason,

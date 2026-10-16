@@ -10,8 +10,6 @@ import {
   FranchiseDto,
   franchiseListSchema,
   franchiseSchema,
-  TechnicianDto,
-  technicianSchema,
   TerritoryDto,
   territorySchema,
 } from './admin-franchises.dto';
@@ -72,29 +70,6 @@ export class AdminFranchisesController {
     @Meta() meta: RequestMeta,
   ) {
     return this.franchises.territories(auth.sub, franchiseId, dto, meta);
-  }
-
-  @Post(':id/technicians')
-  @RequirePermissions('franchises.write')
-  addTechnician(
-    @CurrentAuth() auth: AccessClaims,
-    @Param('id', id) franchiseId: string,
-    @Body(new ZodValidationPipe(technicianSchema)) dto: TechnicianDto,
-    @Meta() meta: RequestMeta,
-  ) {
-    return this.franchises.saveTechnician(auth.sub, franchiseId, null, dto, meta);
-  }
-
-  @Put(':id/technicians/:technicianId')
-  @RequirePermissions('franchises.write')
-  updateTechnician(
-    @CurrentAuth() auth: AccessClaims,
-    @Param('id', id) franchiseId: string,
-    @Param('technicianId', id) technicianId: string,
-    @Body(new ZodValidationPipe(technicianSchema)) dto: TechnicianDto,
-    @Meta() meta: RequestMeta,
-  ) {
-    return this.franchises.saveTechnician(auth.sub, franchiseId, technicianId, dto, meta);
   }
 
   @Post(':id/owner/reset-password')

@@ -17,6 +17,8 @@ import { LeadsModule } from './modules/leads/leads.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PartnerModule } from './modules/partner/partner.module';
+import { ClaimsModule } from './modules/claims/claims.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 import { PricingModule } from './modules/pricing/pricing.module';
 import { QuotationsModule } from './modules/quotations/quotations.module';
 import { StaffModule } from './modules/staff/staff.module';
@@ -38,11 +40,13 @@ import { UploadsModule } from './modules/uploads/uploads.module';
     UploadsModule,
     AddressesModule,
     OrdersModule,
+    PaymentsModule,
     QuotationsModule,
     LeadsModule,
     AdminModule,
     StaffModule,
     PartnerModule,
+    ClaimsModule,
     AssistantModule,
     FieldServiceModule,
   ],

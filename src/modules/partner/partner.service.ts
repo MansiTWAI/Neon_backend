@@ -1,26 +1,16 @@
-import {
-  ConflictException,
-  Injectable,
-  NotFoundException,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { OPEN_STATUSES } from '@neon-adda/shared';
 import { Prisma } from '@prisma/client';
 import { pageOf, skipTake } from '../../common/http/pagination';
 import type { RequestMeta } from '../../common/http/request-meta';
 import { PrismaService } from '../../database/prisma.service';
-import { translateUnique } from '../admin/pricing/admin-pricing.service';
 import { AuditService } from '../audit/audit.service';
+import { promoteEligibleCommission } from '../claims/commission-ledger';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { AddressSnapshot } from '../orders/address-snapshot';
+import { letteringOf } from '../designs/design.dto';
 import { StorageService } from '../storage/storage.service';
-import {
-  PartnerInstallationDto,
-  PartnerLeadListQuery,
-  PartnerLeadUpdateDto,
-  PartnerOrderListQuery,
-  PartnerTechnicianDto,
-} from './partner.dto';
+import { PartnerLeadListQuery, PartnerLeadUpdateDto, PartnerOrderListQuery } from './partner.dto';
 
 const paise = (value: bigint | null | undefined) => Number(value ?? 0n);
 
@@ -70,6 +60,7 @@ export class PartnerService {
   ) {}
 
   async overview(franchiseId: string) {
+    await promoteEligibleCommission(this.prisma);
     const today = startOfTodayInIndia();
     const tomorrow = new Date(today.getTime() + 86_400_000);
     const [openOrders, toSchedule, visitsToday, newLeads, cashToCollect, commission] = await Promise.all([
@@ -117,7 +108,10 @@ export class PartnerService {
       cashToCollect: { orders: cashToCollect._count, amountPaise: paise(cashToCollect._sum.amountDuePaise) },
       commission: {
         pendingPaise: earned(['PENDING', 'ON_HOLD']),
-        duePaise: earned(['ELIGIBLE', 'APPROVED']),
+        /** Eligible and not yet claimed: what the partner can put in a claim now. */
+        claimablePaise: earned(['ELIGIBLE']),
+        claimedPaise: earned(['CLAIMED', 'DISPUTED']),
+        duePaise: earned(['ELIGIBLE', 'CLAIMED', 'DISPUTED', 'APPROVED']),
         paidPaise: earned(['PAID']),
       },
       visitsToday: visitsToday.map((job) => ({
@@ -187,7 +181,10 @@ export class PartnerService {
       this.prisma.order.findFirst({
         where: { orderNo, franchiseId },
         include: {
-          items: { orderBy: { id: 'asc' }, include: { design: { select: { previewKey: true } } } },
+          items: {
+            orderBy: { id: 'asc' },
+            include: { design: { select: { previewKey: true, config: true } } },
+          },
           statusHistory: { orderBy: { createdAt: 'asc' } },
           installationJobs: {
             orderBy: { createdAt: 'desc' },
@@ -210,14 +207,6 @@ export class PartnerService {
 
     const address = order.shippingAddress as AddressSnapshot;
     const job = order.installationJobs[0];
-    const technicians = order.installationRequired
-      ? await this.prisma.technician.findMany({
-          where: { franchiseId, isActive: true },
-          orderBy: { name: 'asc' },
-          select: { id: true, name: true },
-        })
-      : [];
-
     return {
       orderNo: order.orderNo,
       status: order.status,
@@ -246,6 +235,8 @@ export class PartnerService {
         qty: item.qty,
         amountPaise: paise(item.lineTaxablePaise),
         previewUrl: this.storage.url(item.design?.previewKey),
+        // The words, font and colours, so the sign can be drawn when there is no preview picture.
+        lettering: letteringOf(item.design?.config),
       })),
       totals: {
         totalPaise: paise(order.totalPaise),
@@ -268,117 +259,8 @@ export class PartnerService {
           url: this.storage.url(photo.fileKey),
         })),
       },
-      technicians,
       commission: order.commissions.map((c) => ({ status: c.status, amountPaise: paise(c.amountPaise) })),
     };
-  }
-
-  async scheduleInstallation(
-    actorId: string,
-    franchiseId: string,
-    orderNo: string,
-    dto: PartnerInstallationDto,
-    meta: RequestMeta,
-  ) {
-    const order = await this.prisma.order.findFirst({
-      where: { orderNo, franchiseId },
-      include: { installationJobs: { orderBy: { createdAt: 'desc' }, take: 1 } },
-    });
-    if (!order)
-      throw new NotFoundException({ code: 'ORDER_NOT_FOUND', title: 'This order is not assigned to you' });
-    if (!order.installationRequired) {
-      throw new ConflictException({
-        code: 'NO_INSTALLATION',
-        title: 'Installation was not booked for this order',
-      });
-    }
-    if (['PENDING_PAYMENT', 'CANCELLED', 'EXPIRED', 'COMPLETED', 'INSTALLED'].includes(order.status)) {
-      throw new ConflictException({
-        code: 'ORDER_CLOSED',
-        title: 'This order does not need an installation slot now',
-      });
-    }
-    const job = order.installationJobs[0];
-    if (job && ['ON_THE_WAY', 'REACHED', 'WORK_STARTED'].includes(job.status)) {
-      throw new ConflictException({
-        code: 'VISIT_UNDER_WAY',
-        title: 'The technician is already on this visit',
-      });
-    }
-
-    const technician = dto.technicianId
-      ? await this.prisma.technician.findFirst({
-          where: { id: dto.technicianId, franchiseId, isActive: true },
-        })
-      : null;
-    if (dto.technicianId && !technician) {
-      throw new UnprocessableEntityException({
-        code: 'TECHNICIAN_UNAVAILABLE',
-        title: 'Choose one of your active technicians',
-        field: 'technicianId',
-      });
-    }
-
-    const start = dto.scheduledStart;
-    const end = start ? new Date(start.getTime() + dto.durationHours * 3600_000) : null;
-    const rescheduled = Boolean(
-      job?.scheduledStart && start && job.scheduledStart.getTime() !== start.getTime(),
-    );
-    const data = {
-      technicianId: technician?.id ?? null,
-      scheduledStart: start,
-      scheduledEnd: end,
-      notes: dto.notes ?? null,
-      failReason: null,
-      status:
-        technician && start
-          ? rescheduled
-            ? ('RESCHEDULED' as const)
-            : ('SCHEDULED' as const)
-          : ('UNASSIGNED' as const),
-    };
-
-    await this.prisma.$transaction(async (tx) => {
-      if (job) await tx.installationJob.update({ where: { id: job.id }, data });
-      else await tx.installationJob.create({ data: { ...data, orderId: order.id, franchiseId } });
-      await this.audit.record(
-        {
-          actorId,
-          action: 'order.installation-scheduled',
-          entity: 'order',
-          entityId: order.id,
-          after: dto,
-          ...meta,
-        },
-        tx,
-      );
-    });
-
-    if (technician && start) {
-      const when = new Intl.DateTimeFormat('en-IN', {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-        timeZone: 'Asia/Kolkata',
-      }).format(start);
-      await this.notifications.notify(
-        order.customerId,
-        {
-          kind: 'order.updated',
-          title: 'Installation booked',
-          body: `${technician.name} will come on ${when}.`,
-          link: `/orders/${orderNo}`,
-        },
-        ['customer'],
-      );
-      if (technician.userId) {
-        await this.notifications.notify(
-          technician.userId,
-          { kind: 'job.assigned', title: 'New installation', body: `${orderNo} on ${when}`, link: '/' },
-          ['technician'],
-        );
-      }
-    }
-    return this.order(franchiseId, orderNo);
   }
 
   async installations(franchiseId: string) {
@@ -417,63 +299,6 @@ export class PartnerService {
         failReason: job.failReason,
       };
     });
-  }
-
-  async technicians(franchiseId: string) {
-    const technicians = await this.prisma.technician.findMany({
-      where: { franchiseId },
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
-      include: {
-        _count: { select: { jobs: { where: { status: 'COMPLETED' } } } },
-        jobs: {
-          where: { status: { notIn: ['COMPLETED', 'FAILED', 'CANCELLED'] } },
-          select: { id: true },
-        },
-      },
-    });
-    return technicians.map((t) => ({
-      id: t.id,
-      name: t.name,
-      phone: t.phone,
-      isActive: t.isActive,
-      completedJobs: t._count.jobs,
-      openJobs: t.jobs.length,
-    }));
-  }
-
-  async saveTechnician(
-    actorId: string,
-    franchiseId: string,
-    technicianId: string | null,
-    dto: PartnerTechnicianDto,
-    meta: RequestMeta,
-  ) {
-    if (technicianId) {
-      const owned = await this.prisma.technician.count({ where: { id: technicianId, franchiseId } });
-      if (!owned)
-        throw new NotFoundException({ code: 'TECHNICIAN_NOT_FOUND', title: 'Technician not found' });
-    }
-    try {
-      await this.prisma.$transaction(async (tx) => {
-        const technician = technicianId
-          ? await tx.technician.update({ where: { id: technicianId }, data: dto })
-          : await tx.technician.create({ data: { ...dto, franchiseId } });
-        await this.audit.record(
-          {
-            actorId,
-            action: technicianId ? 'technician.updated' : 'technician.added',
-            entity: 'franchise',
-            entityId: franchiseId,
-            after: { technicianId: technician.id, ...dto },
-            ...meta,
-          },
-          tx,
-        );
-      });
-    } catch (error) {
-      throw translateUnique(error, 'This mobile number is already registered to a technician');
-    }
-    return this.technicians(franchiseId);
   }
 
   async leads(franchiseId: string, query: PartnerLeadListQuery) {
@@ -527,12 +352,16 @@ export class PartnerService {
   }
 
   async commissionLedger(franchiseId: string) {
+    await promoteEligibleCommission(this.prisma);
     const [entries, payouts] = await Promise.all([
       this.prisma.commission.findMany({
         where: { franchiseId },
         orderBy: { createdAt: 'desc' },
         take: 200,
-        include: { order: { select: { orderNo: true, status: true } } },
+        include: {
+          order: { select: { orderNo: true, status: true } },
+          claim: { select: { id: true, claimNo: true, status: true } },
+        },
       }),
       this.prisma.payout.findMany({
         where: { franchiseId, status: { not: 'CANCELLED' } },
@@ -551,6 +380,7 @@ export class PartnerService {
         status: c.status,
         eligibleAt: c.eligibleAt,
         createdAt: c.createdAt,
+        claim: c.claim,
       })),
       payouts: payouts.map((p) => ({
         id: p.id,

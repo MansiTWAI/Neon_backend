@@ -120,6 +120,24 @@ const envSchema = z
     /** Pictures each signed-in customer may ask for per day. */
     ARTWORK_PER_CUSTOMER_DAILY: z.coerce.number().int().min(1).default(5),
 
+    /**
+     * Razorpay, for paying online at checkout. Without the key pair the shop offers cash on delivery
+     * only. Use the rzp_test_ keys until the account is activated. The webhook secret is the one set
+     * on the webhook in the Razorpay dashboard (not the API secret).
+     */
+    RAZORPAY_KEY_ID: optionalText,
+    RAZORPAY_KEY_SECRET: optionalText,
+    RAZORPAY_WEBHOOK_SECRET: optionalText,
+    /** Only changed to point local tests at a stand-in for Razorpay. */
+    RAZORPAY_API_URL: z.string().url().default('https://api.razorpay.com/v1'),
+    /** Minutes a customer has to pay online before an unpaid order lapses. */
+    ONLINE_PAYMENT_WINDOW_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(24 * 60)
+      .default(30),
+
     FIREBASE_PROJECT_ID: optionalText,
     FIREBASE_CLIENT_EMAIL: optionalText,
     // Service-account keys are usually pasted with literal "\n" sequences.
@@ -140,6 +158,20 @@ const envSchema = z
         code: 'custom',
         path: ['CLOUDINARY_API_SECRET'],
         message: 'Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET together, or none',
+      });
+    }
+    if (env.NODE_ENV === 'production' && env.RAZORPAY_API_URL !== 'https://api.razorpay.com/v1') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['RAZORPAY_API_URL'],
+        message: 'RAZORPAY_API_URL is for local tests only; remove it in production',
+      });
+    }
+    if (Boolean(env.RAZORPAY_KEY_ID) !== Boolean(env.RAZORPAY_KEY_SECRET)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['RAZORPAY_KEY_SECRET'],
+        message: 'Set both RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET, or neither',
       });
     }
     if (Boolean(env.META_WA_ACCESS_TOKEN) !== Boolean(env.META_WA_PHONE_NUMBER_ID)) {

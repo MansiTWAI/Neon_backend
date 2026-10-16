@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CommissionRule, resolveCommission, roundHalfUp } from '@neon-adda/shared';
 import { OrderStatus, Prisma } from '@prisma/client';
+import { refreshClaimAmounts } from '../claims/commission-ledger';
 import { NotificationsService } from '../notifications/notifications.service';
 
 type Tx = Prisma.TransactionClient;
@@ -171,11 +172,21 @@ export class OrderWorkflowService {
     });
   }
 
+  /** Unpaid commission on a cancelled or refunded order is withdrawn, including from open claims. */
   private async reverseCommission(tx: Tx, orderId: string) {
-    await tx.commission.updateMany({
-      where: { orderId, status: { in: ['PENDING', 'ELIGIBLE', 'ON_HOLD'] } },
-      data: { status: 'REVERSED' },
+    const open: Prisma.CommissionWhereInput = {
+      orderId,
+      status: { in: ['PENDING', 'ELIGIBLE', 'ON_HOLD', 'CLAIMED', 'DISPUTED'] },
+    };
+    const claimed = await tx.commission.findMany({
+      where: { ...open, claimId: { not: null } },
+      select: { claimId: true },
     });
+    await tx.commission.updateMany({ where: open, data: { status: 'REVERSED' } });
+    await refreshClaimAmounts(
+      tx,
+      claimed.map((c) => c.claimId!),
+    );
   }
 
   /**

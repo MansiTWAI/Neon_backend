@@ -32,7 +32,16 @@ export const commissionRuleSchema = z
   }));
 export type CommissionRuleDto = z.infer<typeof commissionRuleSchema>;
 
-export const LEDGER_STATUSES = ['PENDING', 'ELIGIBLE', 'APPROVED', 'PAID', 'REVERSED', 'ON_HOLD'] as const;
+export const LEDGER_STATUSES = [
+  'PENDING',
+  'ELIGIBLE',
+  'CLAIMED',
+  'DISPUTED',
+  'APPROVED',
+  'PAID',
+  'REVERSED',
+  'ON_HOLD',
+] as const;
 
 export const ledgerQuerySchema = pageSchema.extend({
   status: z.enum(LEDGER_STATUSES).optional().catch(undefined),

@@ -7,14 +7,17 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
 import { Env } from './config/env';
+import { trustedProxyHops } from './common/http/trust-proxy';
 import { MAX_UPLOAD_BYTES } from './modules/uploads/uploads.controller';
 
 async function bootstrap() {
-  // trustProxy so request.ip is the client address behind the load balancer. The body limit
-  // leaves room for the canvas previews that accompany each sign at checkout.
+  // request.ip is the client address recorded by the load balancer, not one the client sends (see
+  // trustedProxyHops). The body limit leaves room for the canvas previews sent with each sign.
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ trustProxy: true, bodyLimit: 6 * 1024 * 1024 }),
+    new FastifyAdapter({ trustProxy: trustedProxyHops(), bodyLimit: 6 * 1024 * 1024 }),
+    // Kept alongside the parsed body so payment webhooks can be checked against their signature.
+    { rawBody: true },
   );
   const config = app.get<ConfigService<Env, true>>(ConfigService);
 
